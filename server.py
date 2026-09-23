@@ -1,6 +1,7 @@
 import os
 import asyncio
 import secrets
+from weakref import WeakValueDictionary
 from contextlib import asynccontextmanager
 from typing import Optional
 from dotenv import load_dotenv
@@ -21,6 +22,8 @@ get_firestore_client()
 
 bot = YuviBot()
 bot_startup_error: Optional[str] = None
+# Keep retries for the same member ordered without retaining idle locks forever.
+verification_locks = WeakValueDictionary()
 
 
 class VerifySuccessRequest(BaseModel):
@@ -133,20 +136,28 @@ async def verify_success(
     if not guild:
         raise HTTPException(status_code=500, detail="Bot is not in any Discord server / Guild not found.")
 
+    lock = verification_locks.setdefault((guild.id, payload.discord_id), asyncio.Lock())
+    async with lock:
+        # Proof may have been unlinked while this callback waited behind a retry.
+        await asyncio.to_thread(require_verified_link, get_firestore_client(), payload.discord_id, payload.email)
+        return await _assign_verified_role(guild, payload)
+
+
+async def _assign_verified_role(guild, payload):
     # 4. Locate Discord Member
     try:
         user_id_int = int(payload.discord_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid discord_id format (must be integer string)")
 
-    member = guild.get_member(user_id_int)
-    if not member:
-        try:
-            member = await guild.fetch_member(user_id_int)
-        except discord.NotFound:
-            raise HTTPException(status_code=404, detail=f"Member {payload.discord_id} not found in Discord server.")
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to fetch member {payload.discord_id}: {e}")
+    # The gateway cache can lag a successful REST role grant. Read fresh roles
+    # inside the lock so overlapping callbacks cannot send duplicate welcomes.
+    try:
+        member = await guild.fetch_member(user_id_int)
+    except discord.NotFound:
+        raise HTTPException(status_code=404, detail=f"Member {payload.discord_id} not found in Discord server.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch member {payload.discord_id}: {e}")
 
     # 5. Locate & Assign Verified Member Role
     verified_role_id = os.getenv("VERIFIED_ROLE_ID")
@@ -209,5 +220,4 @@ async def verify_success(
         "role_granted": role_name,
         "role_assigned": role_assigned
     }
-
 
