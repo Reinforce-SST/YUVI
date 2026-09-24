@@ -1,14 +1,15 @@
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 from firebase_admin import firestore
+
 
 class TicketCategory(str, Enum):
     SPG_REGISTRATION = "spg_registration"
     RESOURCE_REQUEST = "resource_request"
     SUPPORT = "support"
     IDEA_JAR = "idea_jar"
+    FEEDBACK = "feedback"
     REPORT = "report"
     MISC = "misc"
 
@@ -19,8 +20,9 @@ class TicketCategory(str, Enum):
             TicketCategory.RESOURCE_REQUEST: "⚡ Resource Request",
             TicketCategory.SUPPORT: "💬 Support & General Inquiries",
             TicketCategory.IDEA_JAR: "💡 Idea Jar & Suggestions",
+            TicketCategory.FEEDBACK: "📝 Feedback",
             TicketCategory.REPORT: "🛡️ Report Issue / Misconduct",
-            TicketCategory.MISC: "📦 General / Misc"
+            TicketCategory.MISC: "📦 General / Misc",
         }
         return labels.get(self, self.value)
 
@@ -31,8 +33,9 @@ class TicketCategory(str, Enum):
             TicketCategory.RESOURCE_REQUEST: "resource",
             TicketCategory.SUPPORT: "support",
             TicketCategory.IDEA_JAR: "idea",
+            TicketCategory.FEEDBACK: "feedback",
             TicketCategory.REPORT: "report",
-            TicketCategory.MISC: "misc"
+            TicketCategory.MISC: "misc",
         }
         return shorts.get(self, "ticket")
 
@@ -43,8 +46,9 @@ class TicketCategory(str, Enum):
             TicketCategory.RESOURCE_REQUEST: "⚡",
             TicketCategory.SUPPORT: "💬",
             TicketCategory.IDEA_JAR: "💡",
+            TicketCategory.FEEDBACK: "📝",
             TicketCategory.REPORT: "🛡️",
-            TicketCategory.MISC: "📦"
+            TicketCategory.MISC: "📦",
         }
         return emojis.get(self, "🎫")
 
@@ -55,8 +59,9 @@ class TicketCategory(str, Enum):
             TicketCategory.RESOURCE_REQUEST: "Request GPU/Compute, hardware, API credits, or mentorship (SPG only)",
             TicketCategory.SUPPORT: "Get help with club activities, roles, events, or tracks",
             TicketCategory.IDEA_JAR: "Submit project ideas or suggest improvements for the club",
+            TicketCategory.FEEDBACK: "Share feedback about the club or its activities",
             TicketCategory.REPORT: "Confidential reports regarding rule violations or misconduct",
-            TicketCategory.MISC: "Other questions or inquiries"
+            TicketCategory.MISC: "Other questions or inquiries",
         }
         return descriptions.get(self, "Support Ticket")
 
@@ -73,7 +78,7 @@ class TicketStatus(str, Enum):
             TicketStatus.OPEN: "🟢 Open",
             TicketStatus.IN_PROGRESS: "🟡 In Progress",
             TicketStatus.RESOLVED: "🔵 Resolved",
-            TicketStatus.CLOSED: "🔴 Closed"
+            TicketStatus.CLOSED: "🔴 Closed",
         }
         return labels.get(self, self.value)
 
@@ -99,7 +104,7 @@ class TicketUser:
             "username": self.username,
             "discriminator": self.discriminator,
             "email": self.email,
-            "avatar_url": self.avatar_url
+            "avatar_url": self.avatar_url,
         }
 
     @classmethod
@@ -111,7 +116,7 @@ class TicketUser:
             username=data.get("username", "Unknown"),
             discriminator=data.get("discriminator"),
             email=data.get("email"),
-            avatar_url=data.get("avatar_url")
+            avatar_url=data.get("avatar_url"),
         )
 
 
@@ -129,7 +134,7 @@ class DiscordMeta:
             "channel_id": self.channel_id,
             "thread_id": self.thread_id,
             "panel_message_id": self.panel_message_id,
-            "control_message_id": self.control_message_id
+            "control_message_id": self.control_message_id,
         }
 
     @classmethod
@@ -140,8 +145,12 @@ class DiscordMeta:
             guild_id=str(data.get("guild_id", "")),
             channel_id=str(data.get("channel_id", "")),
             thread_id=str(data.get("thread_id", "")),
-            panel_message_id=str(data.get("panel_message_id")) if data.get("panel_message_id") else None,
-            control_message_id=str(data.get("control_message_id")) if data.get("control_message_id") else None
+            panel_message_id=str(data.get("panel_message_id"))
+            if data.get("panel_message_id")
+            else None,
+            control_message_id=str(data.get("control_message_id"))
+            if data.get("control_message_id")
+            else None,
         )
 
 
@@ -151,7 +160,7 @@ class TicketMessage:
     sender_name: str
     sender_avatar: Optional[str] = None
     sender_role: str = "user"  # "user", "admin", "lead", "bot"
-    source: str = "discord"     # "discord", "web"
+    source: str = "discord"  # "discord", "web"
     content: str = ""
     attachments: List[str] = field(default_factory=list)
     timestamp: Any = None
@@ -161,6 +170,7 @@ class TicketMessage:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "sender_id": self.sender_id,
+            "sender_uid": self.sender_id,
             "sender_name": self.sender_name,
             "sender_avatar": self.sender_avatar,
             "sender_role": self.sender_role,
@@ -168,14 +178,14 @@ class TicketMessage:
             "content": self.content,
             "attachments": self.attachments,
             "timestamp": self.timestamp or firestore.SERVER_TIMESTAMP,
-            "discord_message_id": self.discord_message_id
+            "discord_message_id": self.discord_message_id,
         }
 
     @classmethod
     def from_dict(cls, doc_id: str, data: Dict[str, Any]) -> "TicketMessage":
         return cls(
             id=doc_id,
-            sender_id=str(data.get("sender_id", "")),
+            sender_id=str(data.get("sender_uid") or data.get("sender_id", "")),
             sender_name=data.get("sender_name", "Unknown"),
             sender_avatar=data.get("sender_avatar"),
             sender_role=data.get("sender_role", "user"),
@@ -183,7 +193,9 @@ class TicketMessage:
             content=data.get("content", ""),
             attachments=data.get("attachments", []),
             timestamp=data.get("timestamp"),
-            discord_message_id=str(data.get("discord_message_id")) if data.get("discord_message_id") else None
+            discord_message_id=str(data.get("discord_message_id"))
+            if data.get("discord_message_id")
+            else None,
         )
 
 
@@ -197,6 +209,7 @@ class Ticket:
     status: TicketStatus = TicketStatus.OPEN
     priority: TicketPriority = TicketPriority.MEDIUM
     created_by: Optional[TicketUser] = None
+    created_by_uid: Optional[str] = None
     assigned_to: Optional[TicketUser] = None
     closed_by: Optional[TicketUser] = None
     close_reason: Optional[str] = None
@@ -209,17 +222,28 @@ class Ticket:
 
     def to_dict(self) -> Dict[str, Any]:
         # Sync thread_id and guild_id from discord_meta if not set directly
-        tid = self.thread_id or (self.discord_meta.thread_id if self.discord_meta else None)
-        gid = self.guild_id or (self.discord_meta.guild_id if self.discord_meta else None)
-        
+        tid = self.thread_id or (
+            self.discord_meta.thread_id if self.discord_meta else None
+        )
+        gid = self.guild_id or (
+            self.discord_meta.guild_id if self.discord_meta else None
+        )
+
         data = {
-            "category": self.category.value if isinstance(self.category, TicketCategory) else str(self.category),
+            "category": self.category.value
+            if isinstance(self.category, TicketCategory)
+            else str(self.category),
             "title": self.title,
             "description": self.description,
             "fields": self.fields,
-            "status": self.status.value if isinstance(self.status, TicketStatus) else str(self.status),
-            "priority": self.priority.value if isinstance(self.priority, TicketPriority) else str(self.priority),
+            "status": self.status.value
+            if isinstance(self.status, TicketStatus)
+            else str(self.status),
+            "priority": self.priority.value
+            if isinstance(self.priority, TicketPriority)
+            else str(self.priority),
             "created_by": self.created_by.to_dict() if self.created_by else None,
+            "created_by_uid": self.created_by_uid,
             "assigned_to": self.assigned_to.to_dict() if self.assigned_to else None,
             "closed_by": self.closed_by.to_dict() if self.closed_by else None,
             "close_reason": self.close_reason,
@@ -228,7 +252,7 @@ class Ticket:
             "guild_id": gid,
             "created_at": self.created_at or firestore.SERVER_TIMESTAMP,
             "updated_at": self.updated_at or firestore.SERVER_TIMESTAMP,
-            "closed_at": self.closed_at
+            "closed_at": self.closed_at,
         }
         return data
 
@@ -253,8 +277,16 @@ class Ticket:
             priority = TicketPriority.MEDIUM
 
         discord_meta = DiscordMeta.from_dict(data.get("discord_meta"))
-        thread_id = str(data.get("thread_id")) if data.get("thread_id") else (discord_meta.thread_id if discord_meta else None)
-        guild_id = str(data.get("guild_id")) if data.get("guild_id") else (discord_meta.guild_id if discord_meta else None)
+        thread_id = (
+            str(data.get("thread_id"))
+            if data.get("thread_id")
+            else (discord_meta.thread_id if discord_meta else None)
+        )
+        guild_id = (
+            str(data.get("guild_id"))
+            if data.get("guild_id")
+            else (discord_meta.guild_id if discord_meta else None)
+        )
 
         return cls(
             id=doc_id,
@@ -265,6 +297,7 @@ class Ticket:
             status=status,
             priority=priority,
             created_by=TicketUser.from_dict(data.get("created_by")),
+            created_by_uid=data.get("created_by_uid"),
             assigned_to=TicketUser.from_dict(data.get("assigned_to")),
             closed_by=TicketUser.from_dict(data.get("closed_by")),
             close_reason=data.get("close_reason"),
@@ -273,5 +306,5 @@ class Ticket:
             guild_id=guild_id,
             created_at=data.get("created_at"),
             updated_at=data.get("updated_at"),
-            closed_at=data.get("closed_at")
+            closed_at=data.get("closed_at"),
         )

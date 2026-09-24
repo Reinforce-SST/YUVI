@@ -77,7 +77,7 @@ sequenceDiagram
 ### Webhook Specification
 
 - **Endpoint**: `POST /internal/verify-success`
-- **Headers**: `X-Internal-Secret: <string>` (optional, required if `BOT_INTERNAL_SECRET` is set in `.env`)
+- **Headers**: `X-Internal-Secret: <string>` (required; must match `BOT_INTERNAL_SECRET`)
 - **Body**:
   ```json
   {
@@ -103,6 +103,13 @@ sequenceDiagram
 ## Ticket & SPG System
 
 Tickets are stored in Firestore under `tickets/{ticket_id}` and conversations are recorded in `tickets/{ticket_id}/messages/{message_id}` in real time. This keeps Discord threads and the web dashboard in sync.
+
+The dashboard bridge exposes two authenticated internal endpoints:
+
+- `POST /tickets/create-thread` creates the private Discord thread for an existing dashboard ticket and returns its Discord metadata.
+- `POST /tickets/relay-message` posts a dashboard-authored message to the ticket's linked Discord thread.
+
+Both require the `X-Internal-Secret` header and reject a thread ID that does not match the stored ticket.
 
 ### Categories & Modals
 
@@ -163,7 +170,7 @@ Key variables:
 - `TICKETS_CHANNEL_ID`: Channel where private ticket threads are opened.
 - `ADMIN_ROLE_ID` / `SUPPORT_ROLE_ID`: Staff role IDs for alerts and ticket management.
 - `TRANSCRIPTS_CHANNEL_ID`: Channel ID to upload transcripts upon ticket closure.
-- `BOT_INTERNAL_SECRET`: Optional shared secret for the `/internal/verify-success` webhook.
+- `BOT_INTERNAL_SECRET`: Required shared secret for verification and dashboard ticket bridge requests.
 - `GOOGLE_APPLICATION_CREDENTIALS`: Path to Firebase service account JSON.
 
 ### 2. Running the Application
