@@ -1,13 +1,16 @@
 import asyncio
 import random
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 from firebase_admin import firestore
 from models.idea import Idea
 from models.ticket import TicketUser
 from utils.api_client import APIClient
+from utils.auth_links import verified_uid_for_discord
 from utils.firestore_client import get_firestore_client
 
 IDEAS_COLLECTION = "ideas"
+def _user_uid(db, discord_id: Optional[str]) -> Optional[str]:
+    return verified_uid_for_discord(db, discord_id) if discord_id else None
 
 
 class IdeaManager:
@@ -26,7 +29,6 @@ class IdeaManager:
             "prerequisites": idea.prerequisites,
             "rough_roadmap": idea.rough_roadmap,
             "learning_outcomes": idea.learning_outcomes,
-            "creator_uid": idea.created_by_uid,
         }
 
         res = await APIClient.post("ideas", json_data=payload)
@@ -46,6 +48,8 @@ class IdeaManager:
         def _sync_create():
             try:
                 db = cls._get_db()
+                if idea.created_by and not idea.created_by_uid:
+                    idea.created_by_uid = _user_uid(db, idea.created_by.discord_id)
                 doc_ref = db.collection(IDEAS_COLLECTION).document()
                 idea.id = doc_ref.id
                 doc_ref.set(idea.to_dict())
@@ -88,7 +92,10 @@ class IdeaManager:
         if track and track.lower() not in ("all", "any"):
             params["track"] = "misc" if track.lower() in ("other", "general") else track.lower()
 
-        res = await APIClient.get("ideas/random", params=params if params else None)
+        res = (
+            await APIClient.get("ideas/random", params=params if params else None)
+            if not difficulty else None
+        )
         if res and res.get("id"):
             return Idea.from_dict(res["id"], res)
 
@@ -99,20 +106,17 @@ class IdeaManager:
                 docs_verified = list(db.collection(IDEAS_COLLECTION).where("is_verified", "==", True).stream())
                 docs_approved = list(db.collection(IDEAS_COLLECTION).where("is_approved", "==", True).stream())
                 combined = {d.id: d for d in [*docs_verified, *docs_approved]}
-                docs = list(combined.values())
-
+                ideas = [Idea.from_dict(doc.id, doc.to_dict() or {}) for doc in combined.values()]
                 if track and track.lower() not in ("all", "any"):
-                    clean_t = "misc" if track.lower() in ("other", "general") else track.lower()
-                    docs = [d for d in docs if (d.to_dict() or {}).get("track") == clean_t]
-
+                    clean_t = "misc" if track.lower() in ("other", "general", "misc") else track.lower()
+                    ideas = [idea for idea in ideas if idea.track == clean_t]
                 if difficulty:
-                    docs = [d for d in docs if (d.to_dict() or {}).get("difficulty") == difficulty.lower().strip()]
+                    ideas = [idea for idea in ideas if idea.difficulty == difficulty.lower().strip()]
 
-                if not docs:
+                if not ideas:
                     return None
 
-                selected_doc = random.choice(docs)
-                return Idea.from_dict(selected_doc.id, selected_doc.to_dict())
+                return random.choice(ideas)
             except Exception as e:
                 print(f"[IdeaManager] Error fetching random idea from Firestore: {e}")
                 return None
@@ -126,19 +130,23 @@ class IdeaManager:
         track: Optional[str] = None,
         limit: int = 50
     ) -> List[Idea]:
-        """List ideas with filters via API/Firestore."""
+        """List canonical and legacy ideas with approval and track filters."""
         def _sync_list():
             try:
                 db = cls._get_db()
-                query = db.collection(IDEAS_COLLECTION)
+                collection = db.collection(IDEAS_COLLECTION)
+                queries = [collection] if is_approved is None else [
+                    collection.where("is_verified", "==", is_approved),
+                    collection.where("is_approved", "==", is_approved),
+                ]
+                by_id = {doc.id: doc for query in queries for doc in query.stream()}
+                ideas = [Idea.from_dict(doc.id, doc.to_dict() or {}) for doc in by_id.values()]
                 if is_approved is not None:
-                    query = query.where("is_verified", "==", is_approved)
+                    ideas = [idea for idea in ideas if idea.is_approved is is_approved]
                 if track:
-                    clean_t = "misc" if track.lower() in ("other", "general") else track.lower()
-                    query = query.where("track", "==", clean_t)
-
-                docs = list(query.limit(limit).stream())
-                return [Idea.from_dict(d.id, d.to_dict()) for d in docs]
+                    clean_t = "misc" if track.lower() in ("other", "general", "misc") else track.lower()
+                    ideas = [idea for idea in ideas if idea.track == clean_t]
+                return ideas[:limit]
             except Exception as e:
                 print(f"[IdeaManager] Error listing ideas: {e}")
                 return []
@@ -163,7 +171,7 @@ class IdeaManager:
                     "is_verified": True,
                     "is_approved": True,
                     "approved_by": admin.to_dict(),
-                    "approved_by_uid": admin.uid or admin.discord_id,
+                    "approved_by_uid": admin.uid or _user_uid(db, admin.discord_id),
                     "approved_at": firestore.SERVER_TIMESTAMP,
                     "updated_at": firestore.SERVER_TIMESTAMP
                 })
@@ -192,4 +200,3 @@ class IdeaManager:
                 return False
 
         return await asyncio.to_thread(_sync_delete)
-

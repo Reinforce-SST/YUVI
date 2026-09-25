@@ -115,8 +115,8 @@ class Idea:
             id=doc_id,
             title=data.get("title", "Untitled Idea"),
             description=data.get("description", ""),
-            track="misc" if data.get("track") in ("other", "general") else data.get("track", "misc"),
-            difficulty=data.get("difficulty", "intermediate"),
+            track="misc" if data.get("track") in (None, "other", "general") else data["track"],
+            difficulty=data.get("difficulty") or "intermediate",
             prerequisites=normalize_items_list(data.get("prerequisites")),
             learning_outcomes=normalize_items_list(data.get("learning_outcomes")),
             rough_roadmap=roadmap,
@@ -130,4 +130,3 @@ class Idea:
             created_at=data.get("created_at"),
             approved_at=data.get("approved_at")
         )
-

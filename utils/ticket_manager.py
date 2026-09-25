@@ -1,9 +1,11 @@
 import asyncio
-from datetime import datetime, timezone
+from hashlib import sha256
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from firebase_admin import firestore
 from models.ticket import Ticket, TicketCategory, TicketMessage, TicketStatus, TicketUser
 from utils.api_client import APIClient
+from utils.auth_links import verified_uid_for_discord
 from utils.firestore_client import get_firestore_client
 
 TICKETS_COLLECTION = "tickets"
@@ -45,6 +47,10 @@ class TicketManager:
         def _sync_create():
             try:
                 db = cls._get_db()
+                if ticket.created_by and not ticket.created_by_uid:
+                    ticket.created_by_uid = verified_uid_for_discord(
+                        db, ticket.created_by.discord_id
+                    )
                 doc_ref = db.collection(TICKETS_COLLECTION).document()
                 ticket.id = doc_ref.id
                 doc_data = ticket.to_dict()
@@ -113,6 +119,58 @@ class TicketManager:
         await asyncio.to_thread(_sync_update)
 
     @classmethod
+    async def reserve_thread_creation(cls, ticket_id: str) -> Dict[str, Any]:
+        """Reserve one Discord thread per ticket across concurrent bot requests."""
+        def _sync_reserve():
+            db = cls._get_db()
+            ticket_ref = db.collection(TICKETS_COLLECTION).document(ticket_id)
+            transaction = db.transaction()
+
+            @firestore.transactional
+            def reserve(txn):
+                snapshot = ticket_ref.get(transaction=txn)
+                if not snapshot.exists:
+                    return {"status": "missing"}
+                data = snapshot.to_dict() or {}
+                meta = data.get("discord_meta") or {}
+                state = data.get("discord_thread_state")
+                if meta.get("thread_id") and state in (None, "ready"):
+                    return {"status": "existing", "discord_meta": meta}
+
+                started_at = data.get("discord_thread_started_at")
+                if isinstance(started_at, str):
+                    try:
+                        started_at = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+                    except ValueError:
+                        started_at = None
+                now = datetime.now(timezone.utc)
+                if (state in {"creating", "created"} and isinstance(started_at, datetime)
+                        and now - started_at.astimezone(timezone.utc) < timedelta(minutes=2)):
+                    return {"status": "busy"}
+
+                txn.update(ticket_ref, {
+                    "discord_thread_state": "creating",
+                    "discord_thread_started_at": now.isoformat(),
+                    "updated_at": firestore.SERVER_TIMESTAMP,
+                })
+                return {
+                    "status": "resume" if meta.get("thread_id") else "reserved",
+                    "discord_meta": meta or None,
+                }
+
+            return reserve(transaction)
+
+        return await asyncio.to_thread(_sync_reserve)
+
+    @classmethod
+    async def release_thread_creation(cls, ticket_id: str) -> None:
+        """Allow a failed thread-setup attempt to be retried immediately."""
+        await cls.update_ticket(ticket_id, {
+            "discord_thread_state": "retryable",
+            "discord_thread_started_at": None,
+        })
+
+    @classmethod
     async def add_ticket_message(cls, ticket_id: str, message: TicketMessage) -> str:
         """Sync message via API webhook (/api/v1/tickets/internal/bot-sync/{ticket_id}) with fallback."""
         payload = {
@@ -128,14 +186,20 @@ class TicketManager:
 
         # Try API sync endpoint
         res = await APIClient.post(f"tickets/internal/bot-sync/{ticket_id}", json_data=payload)
-        if res and res.get("id"):
-            return res["id"]
+        if res and (res.get("message_id") or res.get("id")):
+            return res.get("message_id") or res["id"]
 
         # Direct Firestore Fallback
         def _sync_add():
             db = cls._get_db()
             ticket_ref = db.collection(TICKETS_COLLECTION).document(ticket_id)
-            msg_ref = ticket_ref.collection(MESSAGES_SUBCOLLECTION).document()
+            msg_id = (
+                f"msg_discord_{sha256(str(message.discord_message_id).encode()).hexdigest()[:24]}"
+                if message.discord_message_id else None
+            )
+            msg_ref = ticket_ref.collection(MESSAGES_SUBCOLLECTION).document(msg_id)
+            if message.discord_message_id and msg_ref.get().exists:
+                return msg_ref.id
             msg_data = message.to_dict()
             msg_ref.set(msg_data)
             ticket_ref.update({"updated_at": firestore.SERVER_TIMESTAMP})
@@ -149,11 +213,14 @@ class TicketManager:
         def _sync_get_messages():
             db = cls._get_db()
             ticket_ref = db.collection(TICKETS_COLLECTION).document(ticket_id)
-            query = ticket_ref.collection(MESSAGES_SUBCOLLECTION).order_by("timestamp", direction=firestore.Query.ASCENDING).limit(limit)
+            query = ticket_ref.collection(MESSAGES_SUBCOLLECTION).order_by(
+                "timestamp", direction=firestore.Query.DESCENDING
+            ).limit(limit)
             docs = query.stream()
             messages = []
             for d in docs:
                 messages.append(TicketMessage.from_dict(d.id, d.to_dict()))
+            messages.reverse()
             return messages
 
         return await asyncio.to_thread(_sync_get_messages)
@@ -228,4 +295,3 @@ class TicketManager:
                 return []
 
         return await asyncio.to_thread(_sync_list_user)
-

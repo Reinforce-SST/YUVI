@@ -3,7 +3,7 @@ import discord
 from discord import ui
 from typing import Optional
 
-from models.idea import Idea, IdeaTrack, IdeaDifficulty, normalize_items_list
+from models.idea import Idea, normalize_items_list
 from models.ticket import TicketUser
 from utils.idea_manager import IdeaManager
 
@@ -13,7 +13,8 @@ def format_track_badge(track_str: str) -> str:
         "research": "🔬 Research Track",
         "product": "🛠️ Product Track",
         "kaggle": "📊 Kaggle Track",
-        "other": "📦 Other / Cross-Track"
+        "other": "📦 General / Misc",
+        "misc": "📦 General / Misc"
     }
     return badges.get(t, f"📌 {track_str.capitalize()}")
 
@@ -35,7 +36,6 @@ def build_idea_embed(idea: Idea) -> discord.Embed:
 
     upvotes = (idea.stats or {}).get("upvote_count", 0)
     views = (idea.stats or {}).get("views_count", 0)
-    claims = (idea.stats or {}).get("claims_count", 0)
 
     embed = discord.Embed(
         title=f"💡 {idea.title}",
@@ -123,7 +123,7 @@ class SubmitIdeaModal(ui.Modal):
             difficulty=self.difficulty,
             prerequisites=normalize_items_list(self.prerequisites.value),
             learning_outcomes=normalize_items_list(self.learning_outcomes.value),
-            roadmap=normalize_items_list(self.roadmap.value),
+            rough_roadmap=normalize_items_list(self.roadmap.value),
             is_approved=False,
             created_by=ticket_user
         )

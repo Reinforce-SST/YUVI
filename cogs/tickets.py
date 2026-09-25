@@ -1,14 +1,11 @@
 import os
-import io
 import discord
 from discord import app_commands
 from discord.ext import commands
 from typing import Optional, Literal
 
 from models.ticket import (
-    TicketCategory,
     TicketStatus,
-    TicketPriority,
     TicketUser,
     TicketMessage
 )
@@ -299,6 +296,7 @@ class TicketsCog(commands.Cog, name="Tickets"):
             source="discord",
             content=message.content or "",
             attachments=attachments,
+            timestamp=message.created_at,
             discord_message_id=str(message.id)
         )
 

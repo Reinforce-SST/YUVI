@@ -1,5 +1,4 @@
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 from firebase_admin import firestore
@@ -169,6 +168,7 @@ class TicketMessage:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "sender_id": self.sender_id,
+            "sender_uid": self.sender_id,
             "sender_name": self.sender_name,
             "sender_avatar": self.sender_avatar,
             "sender_role": self.sender_role,
@@ -183,7 +183,7 @@ class TicketMessage:
     def from_dict(cls, doc_id: str, data: Dict[str, Any]) -> "TicketMessage":
         return cls(
             id=doc_id,
-            sender_id=str(data.get("sender_id", "")),
+            sender_id=str(data.get("sender_uid") or data.get("sender_id") or ""),
             sender_name=data.get("sender_name", "Unknown"),
             sender_avatar=data.get("sender_avatar"),
             sender_role=data.get("sender_role", "user"),

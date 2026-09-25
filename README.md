@@ -99,6 +99,13 @@ sequenceDiagram
 
 Tickets are stored in Firestore under `tickets/{ticket_id}` and conversations are recorded in `tickets/{ticket_id}/messages/{message_id}` in real time. This keeps Discord threads and the web dashboard in sync.
 
+The dashboard bridge accepts `POST /tickets/create-thread` to create a private
+Discord thread for an existing ticket and `POST /tickets/relay-message` to post a
+dashboard message to its linked thread. Both require `X-Internal-Secret` matching
+`BOT_INTERNAL_SECRET`. The older `/internal/tickets/*` aliases use the same checks.
+Thread creation reserves the ticket before calling Discord and can resume a
+partially completed setup without creating a duplicate thread.
+
 ### Categories & Modals
 
 | Category | Purpose | Modal Fields |
