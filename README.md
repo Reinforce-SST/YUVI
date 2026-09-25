@@ -38,13 +38,13 @@ YUVI/
 
 ### Workflow
 1. A user triggers `/auth`, `/login`, or clicks the button on the `/setup-auth` verification panel.
-2. The bot checks Firestore to verify if the Discord ID is already linked.
-3. If not linked, the bot returns an ephemeral link button pointing to:
+2. The bot creates a private one-time proof from the Discord interaction. Existing members can repeat this flow to retry role assignment.
+3. The bot returns an ephemeral link button, valid for ten minutes, pointing to:
    ```text
-   {FRONTEND_AUTH_URL}?discord_id={discord_user_id}
+   {FRONTEND_AUTH_URL}#link_token={private_one_time_token}
    ```
 4. The user completes Google OAuth with their `@sst.scaler.com` account on the frontend.
-5. The main backend validates the token, domain, and duplicate accounts, saves the profile to Firestore under `users/{discord_id}`, and issues a POST request to YUVI's internal webhook.
+5. The main backend validates the Firebase token, verified email domain, one-time proof, and duplicate accounts, then atomically saves the profile to Firestore under `users/{discord_id}`, and issues a POST request to YUVI's internal webhook.
 6. YUVI assigns the verified role to the user and sends a confirmation DM.
 
 ```mermaid
@@ -58,15 +58,11 @@ sequenceDiagram
     participant Server as YUVI FastAPI Webhook
 
     User->>Bot: /auth or panel button
-    Bot->>DB: Query users/{discord_id}
-    alt User already verified
-        Bot-->>User: Ephemeral notice ("Already linked to email")
-    else User unverified
-        Bot-->>User: Ephemeral link: FRONTEND_AUTH_URL?discord_id=...
-    end
+    Bot->>DB: Create hashed proof in discord_link_tokens
+    Bot-->>User: Ephemeral link: FRONTEND_AUTH_URL#link_token=...
 
     User->>Web: Complete Google SSO (@sst.scaler.com)
-    Web->>API: Submit token + discord_id
+    Web->>API: Submit Firebase ID token + link_token
     API->>API: Verify token & @sst.scaler.com domain
     API->>DB: Store user document
     API->>Server: POST /internal/verify-success
@@ -77,14 +73,13 @@ sequenceDiagram
 ### Webhook Specification
 
 - **Endpoint**: `POST /internal/verify-success`
-- **Headers**: `X-Internal-Secret: <string>` (optional, required if `BOT_INTERNAL_SECRET` is set in `.env`)
+- **Headers**: `X-Internal-Secret: <string>` (required; missing server configuration fails closed)
 - **Body**:
   ```json
   {
     "discord_id": "123456789012345678",
     "email": "student@sst.scaler.com",
-    "name": "Full Name",
-    "secret": "optional_secret_matching_env"
+    "name": "Full Name"
   }
   ```
 - **Response**:
@@ -163,7 +158,7 @@ Key variables:
 - `TICKETS_CHANNEL_ID`: Channel where private ticket threads are opened.
 - `ADMIN_ROLE_ID` / `SUPPORT_ROLE_ID`: Staff role IDs for alerts and ticket management.
 - `TRANSCRIPTS_CHANNEL_ID`: Channel ID to upload transcripts upon ticket closure.
-- `BOT_INTERNAL_SECRET`: Optional shared secret for the `/internal/verify-success` webhook.
+- `BOT_INTERNAL_SECRET`: Required shared secret for the `/internal/verify-success` webhook.
 - `GOOGLE_APPLICATION_CREDENTIALS`: Path to Firebase service account JSON.
 
 ### 2. Running the Application
@@ -177,3 +172,28 @@ Or run directly with Uvicorn:
 ```bash
 uvicorn server:app --host 0.0.0.0 --port 8000
 ```
+
+## Coordinated secure-link rollout
+
+Deploy with the matching Dashboard API/web PR; `FRONTEND_AUTH_URL` must point to
+the Next.js `web/` `/auth` page, not the legacy client. Old numeric-ID links no
+longer establish ownership. Existing members run `/auth` again to receive proof.
+
+`discord_link_tokens/{sha256(token)}` stores `discord_id`, native timestamp
+`issued_at`, native timestamp `expires_at` (ten minutes), and `consumed_by: null`.
+The API consumes it transactionally, adding `consumed_by` (Firebase UID), `email`,
+and `consumed_at`, and sets `discord_link_version: 1` on both `users/{email}` and
+`users/{discord_id}`. The webhook checks both records as well as the shared secret.
+Client Firestore rules must deny access to this collection and writes to user
+records. Optional TTL on `expires_at` is for cleanup; the API checks expiry itself.
+
+Deploy the Dashboard API/web first, then this bot in the same change window.
+Configure the same `BOT_INTERNAL_SECRET` on both backends and a reachable
+`YUVI_BOT_URL` on Dashboard. Missing roles, permissions, service outages, and
+conflicting old links need operator attention; retries never claim a role that
+was not assigned. Repeating a successful callback does not send another DM.
+
+Run `uv run python -m unittest discover -s tests -v` before deployment. Tests use
+external-service doubles and never connect to the production database or gateway.
+A real Google sign-in, Discord role grant, and linked ticket read must be checked
+on the deployed pair before announcing readiness to members.

@@ -107,6 +107,8 @@ class UserManager:
                     doc.reference.update({
                         "discord_id": None,
                         "is_verified": False,
+                        "discord_link_version": None,
+                        "verified_at": None,
                         "social_links.discord": None,
                         "updated_at": firestore.SERVER_TIMESTAMP
                     })
@@ -118,6 +120,8 @@ class UserManager:
                         doc.reference.update({
                             "discord_id": None,
                             "is_verified": False,
+                            "discord_link_version": None,
+                            "verified_at": None,
                             "social_links.discord": None,
                             "updated_at": firestore.SERVER_TIMESTAMP
                         })
