@@ -1,10 +1,13 @@
 import os
+import asyncio
 import discord
 from discord import app_commands, ui
 from discord.ext import commands
 from typing import Optional
 
 from utils.user_manager import UserManager
+from utils.auth_links import issue_link
+from utils.firestore_client import get_firestore_client
 
 class AuthLinkView(ui.View):
     def __init__(self, auth_url: str):
@@ -24,31 +27,13 @@ async def send_auth_link(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
 
     discord_id = str(interaction.user.id)
-    user_data = await UserManager.get_user(discord_id)
-
-    # 1. Check if already verified
-    if user_data:
-        email = user_data.get("email", "Unknown")
-        full_name = user_data.get("full_name") or user_data.get("name") or "Member"
-        
-        embed = discord.Embed(
-            title="✅ Account Already Linked",
-            description=(
-                f"Hello {interaction.user.mention}!\n\n"
-                f"Your Discord account is already linked with your SST Google account:\n"
-                f"• **Email:** `{email}`\n"
-                f"• **Name:** `{full_name}`\n\n"
-                f"If you are missing your Verified Member role, please contact an admin."
-            ),
-            color=0x57F287 # Green
-        )
-        await interaction.followup.send(embed=embed, ephemeral=True)
-        return
-
-    # 2. Build auth URL
+    # Fresh proof is also required for legacy links and role-grant retries.
     frontend_url = os.getenv("FRONTEND_AUTH_URL", "http://localhost:3000/auth")
-    sep = "&" if "?" in frontend_url else "?"
-    auth_url = f"{frontend_url}{sep}discord_id={discord_id}"
+    try:
+        auth_url = await asyncio.to_thread(issue_link, get_firestore_client(), discord_id, frontend_url)
+    except Exception:
+        await interaction.followup.send("Verification is temporarily unavailable. Please try /auth again shortly.", ephemeral=True)
+        return
 
     embed = discord.Embed(
         title="🔐 Reinforce Club SST Member Verification",
@@ -56,7 +41,7 @@ async def send_auth_link(interaction: discord.Interaction):
             f"Welcome {interaction.user.mention}!\n\n"
             "To unlock full access to the Reinforce Club Discord server, discussion channels, and Student Project Groups (SPGs), "
             "please authenticate using your official college Google account (**`@sst.scaler.com`**).\n\n"
-            "👉 Click the button below to sign in on the website. Once authorized, your role will be granted automatically!"
+            "Click below within ten minutes. Keep this link private. If your role is missing after signing in, run /auth again to retry."
         ),
         color=0x5865F2 # Blurple
     )
@@ -141,16 +126,40 @@ class AuthCog(commands.Cog, name="Authentication"):
 
         email = user_data.get("email", "N/A")
         full_name = user_data.get("full_name") or user_data.get("name") or "N/A"
+        tier = str(user_data.get("tier", "beginner")).capitalize()
+        is_member = "✅ Member" if user_data.get("is_member") else "❌ Non-Member"
+        is_admin = "🛡️ Admin" if user_data.get("is_admin") else "👤 Student"
         verified_at = user_data.get("verified_at") or user_data.get("created_at") or "N/A"
 
+        points = user_data.get("points") or {}
+        if isinstance(points, dict):
+            pts_total = points.get("total", 0)
+            pts_kaggle = points.get("kaggle", 0)
+            pts_product = points.get("product", 0)
+            pts_research = points.get("research", 0)
+            pts_misc = points.get("misc", 0)
+        else:
+            pts_total = pts_kaggle = pts_product = pts_research = pts_misc = 0
+
+        skills = user_data.get("skills") or []
+        skills_str = ", ".join(skills[:6]) if skills else "None listed"
+
         embed = discord.Embed(
-            title=f"👤 Member Verification Record: {member.name}",
+            title=f"👤 Member Record: {full_name}",
             color=0x5865F2
         )
         embed.add_field(name="Discord User", value=f"{member.mention} (`{member.id}`)", inline=False)
         embed.add_field(name="SST Email", value=f"`{email}`", inline=True)
-        embed.add_field(name="Full Name", value=f"`{full_name}`", inline=True)
-        embed.add_field(name="Verified Date", value=str(verified_at), inline=False)
+        embed.add_field(name="Tier & Role", value=f"`{tier}` | {is_member} | {is_admin}", inline=True)
+        
+        points_breakdown = (
+            f"🏆 **Total:** `{pts_total}` pts\n"
+            f"📊 Kaggle: `{pts_kaggle}` | 🛠️ Product: `{pts_product}`\n"
+            f"🔬 Research: `{pts_research}` | 📦 Misc: `{pts_misc}`"
+        )
+        embed.add_field(name="Points & Standing", value=points_breakdown, inline=False)
+        embed.add_field(name="Skills", value=skills_str, inline=True)
+        embed.add_field(name="Verified Date", value=str(verified_at)[:19], inline=True)
         embed.set_thumbnail(url=member.display_avatar.url)
 
         await interaction.followup.send(embed=embed, ephemeral=True)
@@ -166,16 +175,26 @@ class AuthCog(commands.Cog, name="Authentication"):
             await interaction.followup.send(f"❌ No user found in database linked to `{email}`.", ephemeral=True)
             return
 
-        discord_id = user_data.get("id") or user_data.get("discord_id")
+        discord_id = user_data.get("discord_id") or user_data.get("id")
         full_name = user_data.get("full_name") or user_data.get("name") or "N/A"
+        tier = str(user_data.get("tier", "beginner")).capitalize()
+        is_member = "✅ Member" if user_data.get("is_member") else "❌ Non-Member"
+        
+        points = user_data.get("points") or {}
+        pts_total = points.get("total", 0) if isinstance(points, dict) else 0
 
         embed = discord.Embed(
             title=f"📧 Email Record: {email}",
             color=0x5865F2
         )
-        embed.add_field(name="Discord ID", value=f"`{discord_id}` (<@{discord_id}>)", inline=False)
+        if discord_id and str(discord_id).isdigit():
+            embed.add_field(name="Discord ID", value=f"<@{discord_id}> (`{discord_id}`)", inline=False)
+        else:
+            embed.add_field(name="Discord Link", value="⚠️ Not linked to Discord", inline=False)
+
         embed.add_field(name="Full Name", value=f"`{full_name}`", inline=True)
-        embed.add_field(name="Email", value=f"`{email}`", inline=True)
+        embed.add_field(name="Status & Tier", value=f"{is_member} (`{tier}`)", inline=True)
+        embed.add_field(name="Total Points", value=f"🏆 `{pts_total}` pts", inline=True)
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 

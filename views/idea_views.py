@@ -3,7 +3,7 @@ import discord
 from discord import ui
 from typing import Optional
 
-from models.idea import Idea, IdeaTrack, IdeaDifficulty, normalize_items_list
+from models.idea import Idea, normalize_items_list
 from models.ticket import TicketUser
 from utils.idea_manager import IdeaManager
 
@@ -13,7 +13,8 @@ def format_track_badge(track_str: str) -> str:
         "research": "🔬 Research Track",
         "product": "🛠️ Product Track",
         "kaggle": "📊 Kaggle Track",
-        "other": "📦 Other / Cross-Track"
+        "other": "📦 General / Misc",
+        "misc": "📦 General / Misc"
     }
     return badges.get(t, f"📌 {track_str.capitalize()}")
 
@@ -33,6 +34,9 @@ def build_idea_embed(idea: Idea) -> discord.Embed:
     track_badge = format_track_badge(idea.track)
     diff_badge = format_difficulty_badge(idea.difficulty)
 
+    upvotes = (idea.stats or {}).get("upvote_count", 0)
+    views = (idea.stats or {}).get("views_count", 0)
+
     embed = discord.Embed(
         title=f"💡 {idea.title}",
         description=idea.description,
@@ -40,7 +44,7 @@ def build_idea_embed(idea: Idea) -> discord.Embed:
     )
     embed.add_field(name="Track", value=track_badge, inline=True)
     embed.add_field(name="Difficulty", value=diff_badge, inline=True)
-    embed.add_field(name="Idea ID", value=f"`{idea.id}`", inline=True)
+    embed.add_field(name="Engagement", value=f"👍 `{upvotes}` upvotes • 👀 `{views}` views", inline=True)
 
     if idea.prerequisites:
         prereq_text = "\n".join(f"• {p}" for p in idea.prerequisites)
@@ -50,12 +54,13 @@ def build_idea_embed(idea: Idea) -> discord.Embed:
         outcomes_text = "\n".join(f"• {o}" for o in idea.learning_outcomes)
         embed.add_field(name="Learning Outcomes", value=outcomes_text[:1024], inline=False)
 
-    if idea.roadmap:
-        roadmap_text = "\n".join(f"• {r}" for r in idea.roadmap)
+    if idea.rough_roadmap or idea.roadmap:
+        roadmap_items = idea.rough_roadmap or idea.roadmap
+        roadmap_text = "\n".join(f"• {r}" for r in roadmap_items)
         embed.add_field(name="Rough Roadmap / Milestones", value=roadmap_text[:1024], inline=False)
 
-    creator_name = idea.created_by.username if idea.created_by else "Reinforce Core Team"
-    embed.set_footer(text=f"Submitted by {creator_name} • Reinforce Idea Jar")
+    creator_name = idea.created_by.username if idea.created_by else "Reinforce Community"
+    embed.set_footer(text=f"ID: {idea.id} • Submitted by {creator_name} • Reinforce Idea Jar")
     return embed
 
 
@@ -118,7 +123,7 @@ class SubmitIdeaModal(ui.Modal):
             difficulty=self.difficulty,
             prerequisites=normalize_items_list(self.prerequisites.value),
             learning_outcomes=normalize_items_list(self.learning_outcomes.value),
-            roadmap=normalize_items_list(self.roadmap.value),
+            rough_roadmap=normalize_items_list(self.roadmap.value),
             is_approved=False,
             created_by=ticket_user
         )

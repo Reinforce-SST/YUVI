@@ -1,6 +1,7 @@
 import os
 import asyncio
 import secrets
+from weakref import WeakValueDictionary
 from contextlib import asynccontextmanager
 from typing import Optional
 from dotenv import load_dotenv
@@ -16,9 +17,12 @@ from utils.firestore_client import get_firestore_client
 from utils.ticket_manager import TicketManager
 from views.ticket_controls import TicketControlView
 from yuvi_bot import YuviBot
+from utils.auth_links import require_verified_link, verified_uid_for_discord
 
 bot = YuviBot()
 bot_startup_error: Optional[str] = None
+# Keep retries for the same member ordered without retaining idle locks forever.
+verification_locks = WeakValueDictionary()
 
 
 class VerifySuccessRequest(BaseModel):
@@ -75,8 +79,16 @@ async def ready_guild():
 
 async def user_discord_id(uid: str) -> str:
     def load():
-        snapshot = get_firestore_client().collection("users").document(uid).get()
-        return (snapshot.to_dict() or {}).get("discord_id") if snapshot.exists else None
+        db = get_firestore_client()
+        snapshot = db.collection("users").document(uid).get()
+        if not snapshot.exists:
+            return None
+        user = snapshot.to_dict() or {}
+        discord_id = str(user.get("discord_id") or "")
+        email = user.get("email")
+        if not discord_id.isdigit() or user.get("discord_link_version") != 1 or not email:
+            return None
+        return discord_id if verified_uid_for_discord(db, discord_id) == uid else None
 
     discord_id = await asyncio.to_thread(load)
     if not discord_id:
@@ -90,14 +102,13 @@ async def user_discord_id(uid: str) -> str:
 async def lifespan(app: FastAPI):
     global bot_startup_error
     bot_startup_error = None
-
+    
     # Startup: Start Discord bot as an asyncio background task
     token = os.getenv("DISCORD_TOKEN")
     if not token or not token.strip():
         bot_startup_error = "DISCORD_TOKEN is missing or empty in environment variables"
         print(f"[Server] ERROR: {bot_startup_error}")
     else:
-
         async def run_bot():
             global bot_startup_error
             try:
@@ -105,22 +116,19 @@ async def lifespan(app: FastAPI):
                 await bot.start(token.strip())
             except Exception as e:
                 bot_startup_error = f"{type(e).__name__}: {e}"
-                print(
-                    f"[Server] FATAL: Discord bot failed to start: {bot_startup_error}"
-                )
+                print(f"[Server] FATAL: Discord bot failed to start: {bot_startup_error}")
                 import traceback
-
                 traceback.print_exc()
 
         bot_task = asyncio.create_task(run_bot())
         print("[Server] Discord bot background task launched.")
-
+    
     yield
 
     # Shutdown: Cleanly close Discord bot
     print("[Server] Shutting down Discord bot...")
     await bot.close()
-    if "bot_task" in locals() and not bot_task.done():
+    if 'bot_task' in locals() and not bot_task.done():
         try:
             await asyncio.wait_for(bot_task, timeout=5.0)
         except asyncio.TimeoutError:
@@ -133,7 +141,7 @@ app = FastAPI(
     title="YUVI Bot & Verification Server",
     description="Internal Webhook and API server for Reinforce Club SST Discord Bot",
     version="0.1.0",
-    lifespan=lifespan,
+    lifespan=lifespan
 )
 
 from fastapi.middleware.cors import CORSMiddleware
@@ -154,69 +162,67 @@ async def health_check():
         "status": "healthy",
         "bot_ready": bot.is_ready(),
         "bot_user": str(bot.user) if bot.user else None,
-        "bot_error": bot_startup_error,
+        "bot_error": bot_startup_error
     }
 
 
 @app.post("/internal/verify-success")
 async def verify_success(
-    payload: VerifySuccessRequest, x_internal_secret: Optional[str] = Header(None)
+    payload: VerifySuccessRequest,
+    x_internal_secret: Optional[str] = Header(None)
 ):
     """
     Internal endpoint called by the Reinforce backend server when a user
     successfully authenticates with their @sst.scaler.com Google account.
     """
-    require_internal_secret(payload.secret or x_internal_secret)
+    expected_secret = os.getenv("BOT_INTERNAL_SECRET", "").strip()
+    if not expected_secret:
+        raise HTTPException(status_code=503, detail="Internal verification is not configured.")
+    if not secrets.compare_digest(x_internal_secret or "", expected_secret):
+        raise HTTPException(status_code=401, detail="Invalid internal secret.")
+    if not payload.discord_id.isdigit() or not 5 <= len(payload.discord_id) <= 25:
+        raise HTTPException(status_code=400, detail="Invalid Discord ID.")
+    await asyncio.to_thread(require_verified_link, get_firestore_client(), payload.discord_id, payload.email)
 
     # 2. Ensure Bot is Ready
     if not bot.is_ready():
         try:
             await asyncio.wait_for(bot.wait_until_ready(), timeout=10.0)
         except asyncio.TimeoutError:
-            raise HTTPException(
-                status_code=503,
-                detail="Discord bot is still starting up, please retry shortly.",
-            )
+            raise HTTPException(status_code=503, detail="Discord bot is still starting up, please retry shortly.")
 
     # 3. Locate Target Guild
     guild_id_env = os.getenv("GUILD_ID")
-    guild = (
-        bot.get_guild(int(guild_id_env))
-        if (guild_id_env and guild_id_env.isdigit())
-        else None
-    )
-
+    guild = bot.get_guild(int(guild_id_env)) if (guild_id_env and guild_id_env.isdigit()) else None
+    
     if not guild and bot.guilds:
         guild = bot.guilds[0]
 
     if not guild:
-        raise HTTPException(
-            status_code=500,
-            detail="Bot is not in any Discord server / Guild not found.",
-        )
+        raise HTTPException(status_code=500, detail="Bot is not in any Discord server / Guild not found.")
 
+    lock = verification_locks.setdefault((guild.id, payload.discord_id), asyncio.Lock())
+    async with lock:
+        # Proof may have been unlinked while this callback waited behind a retry.
+        await asyncio.to_thread(require_verified_link, get_firestore_client(), payload.discord_id, payload.email)
+        return await _assign_verified_role(guild, payload)
+
+
+async def _assign_verified_role(guild, payload):
     # 4. Locate Discord Member
     try:
         user_id_int = int(payload.discord_id)
     except ValueError:
-        raise HTTPException(
-            status_code=400, detail="Invalid discord_id format (must be integer string)"
-        )
+        raise HTTPException(status_code=400, detail="Invalid discord_id format (must be integer string)")
 
-    member = guild.get_member(user_id_int)
-    if not member:
-        try:
-            member = await guild.fetch_member(user_id_int)
-        except discord.NotFound:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Member {payload.discord_id} not found in Discord server.",
-            )
-        except Exception as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to fetch member {payload.discord_id}: {e}",
-            )
+    # The gateway cache can lag a successful REST role grant. Read fresh roles
+    # inside the lock so overlapping callbacks cannot send duplicate welcomes.
+    try:
+        member = await guild.fetch_member(user_id_int)
+    except discord.NotFound:
+        raise HTTPException(status_code=404, detail=f"Member {payload.discord_id} not found in Discord server.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch member {payload.discord_id}: {e}")
 
     # 5. Locate & Assign Verified Member Role
     verified_role_id = os.getenv("VERIFIED_ROLE_ID")
@@ -235,27 +241,25 @@ async def verify_success(
     role_assigned = False
     role_name = "None (Role not configured in .env)"
 
+    already_assigned = verified_role is not None and verified_role in member.roles
     if verified_role:
         try:
-            await member.add_roles(
-                verified_role, reason=f"Google account verified: {payload.email}"
-            )
+            if not already_assigned:
+                await member.add_roles(verified_role, reason=f"Google account verified: {payload.email}")
             role_assigned = True
             role_name = verified_role.name
-            print(
-                f"[Server] Assigned role '{role_name}' to {member.name} ({member.id})"
-            )
+            print(f"[Server] Assigned role '{role_name}' to {member.name} ({member.id})")
         except discord.Forbidden:
-            print(
-                f"[Server] ERROR: Missing permissions to assign role '{verified_role.name}' to {member.id}"
-            )
-            raise HTTPException(
-                status_code=500,
-                detail="Bot lacks permission to assign the verified role (ensure bot role is above verified role in server hierarchy).",
-            )
+            print(f"[Server] ERROR: Missing permissions to assign role '{verified_role.name}' to {member.id}")
+            raise HTTPException(status_code=500, detail="Bot lacks permission to assign the verified role (ensure bot role is above verified role in server hierarchy).")
         except Exception as e:
             print(f"[Server] ERROR assigning role: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to assign role: {e}")
+
+    # Do not claim a role was granted when it is not configured, and avoid
+    # repeated DMs when a request is retried after a network failure.
+    if not role_assigned or already_assigned:
+        return {"success": True, "role_assigned": role_assigned, "role_granted": role_name if role_assigned else None}
 
     # 6. Send Direct Message Confirmation
     try:
@@ -267,28 +271,25 @@ async def verify_success(
                 f"You have been granted the **{role_name}** role on Discord.\n\n"
                 f"You now have access to member discussion channels, showcase forums, and Student Project Groups (SPGs)!"
             ),
-            color=0x57F287,
+            color=0x57F287
         )
-        embed.set_footer(
-            text="Reinforce Club SST • Verification System",
-            icon_url=guild.icon.url if guild.icon else None,
-        )
+        embed.set_footer(text="Reinforce Club SST • Verification System", icon_url=guild.icon.url if guild.icon else None)
         await member.send(embed=embed)
     except Exception as e:
-        print(
-            f"[Server] Note: Could not send DM to user {member.id} (DMs might be closed): {e}"
-        )
+        print(f"[Server] Note: Could not send DM to user {member.id} (DMs might be closed): {e}")
 
     return {
         "success": True,
         "discord_id": payload.discord_id,
         "email": payload.email,
         "role_granted": role_name,
-        "role_assigned": role_assigned,
+        "role_assigned": role_assigned
     }
 
 
 @app.post("/tickets/create-thread")
+@app.post("/internal/tickets/create-thread")
+@app.post("/internal/tickets/thread-create")
 async def create_ticket_thread(
     payload: CreateTicketThreadRequest,
     x_internal_secret: Optional[str] = Header(None, alias="X-Internal-Secret"),
@@ -310,6 +311,17 @@ async def create_ticket_thread(
         )
         return {"success": True, "discord_meta": meta, "existing": True}
 
+    try:
+        return await _finish_ticket_thread(payload, reservation)
+    except Exception:
+        try:
+            await TicketManager.release_thread_creation(payload.ticket_id)
+        except Exception as release_error:
+            print(f"[Server] Could not release ticket thread reservation: {release_error}")
+        raise
+
+
+async def _finish_ticket_thread(payload, reservation):
     guild = await ready_guild()
     discord_id = await user_discord_id(payload.creator_uid)
     member = guild.get_member(int(discord_id))
@@ -408,6 +420,8 @@ async def create_ticket_thread(
 
 
 @app.post("/tickets/relay-message")
+@app.post("/internal/tickets/relay-message")
+@app.post("/internal/tickets/message-out")
 async def relay_ticket_message(
     payload: RelayTicketMessageRequest,
     x_internal_secret: Optional[str] = Header(None, alias="X-Internal-Secret"),
@@ -425,6 +439,8 @@ async def relay_ticket_message(
             status_code=409, detail="Ticket is not linked to that Discord thread"
         )
 
+    if not payload.thread_id.isdigit():
+        raise HTTPException(status_code=400, detail="Invalid Discord thread ID")
     channel = bot.get_channel(int(payload.thread_id))
     if channel is None:
         try:
@@ -438,7 +454,9 @@ async def relay_ticket_message(
     if attachment_lines:
         content = f"{content}\n{attachment_lines}"
     messages = [
-        await channel.send(content[index : index + 1900])
+        await channel.send(
+            content[index : index + 1900], allowed_mentions=discord.AllowedMentions.none()
+        )
         for index in range(0, len(content), 1900)
     ]
     return {

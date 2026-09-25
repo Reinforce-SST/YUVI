@@ -1,8 +1,9 @@
 import os
 import asyncio
 import unittest
+from hashlib import sha256
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -175,25 +176,18 @@ class BridgeTests(unittest.TestCase):
         self.addCleanup(self.env.stop)
 
     def test_bridge_routes_require_secret(self):
-        create = self.client.post(
-            "/tickets/create-thread",
-            json={
-                "ticket_id": "tkt-1",
-                "category": "support",
-                "title": "Help",
-                "creator_uid": "uid-1",
-            },
-        )
-        relay = self.client.post(
-            "/tickets/relay-message",
-            json={
-                "ticket_id": "tkt-1",
-                "thread_id": "333",
-                "sender_uid": "uid-1",
-                "content": "Hello",
-            },
-        )
-        self.assertEqual((create.status_code, relay.status_code), (401, 401))
+        create_payload = {
+            "ticket_id": "tkt-1", "category": "support", "title": "Help", "creator_uid": "uid-1"
+        }
+        relay_payload = {
+            "ticket_id": "tkt-1", "thread_id": "333", "sender_uid": "uid-1", "content": "Hello"
+        }
+        for path in ("/tickets/create-thread", "/internal/tickets/create-thread", "/internal/tickets/thread-create"):
+            with self.subTest(path=path):
+                self.assertEqual(self.client.post(path, json=create_payload).status_code, 401)
+        for path in ("/tickets/relay-message", "/internal/tickets/relay-message", "/internal/tickets/message-out"):
+            with self.subTest(path=path):
+                self.assertEqual(self.client.post(path, json=relay_payload).status_code, 401)
 
     def test_create_thread_adds_member_and_persists_metadata(self):
         with (
@@ -284,6 +278,20 @@ class BridgeTests(unittest.TestCase):
         self.guild.channel.thread.add_user.assert_awaited_once()
         self.assertEqual(update.await_count, 2)
 
+    def test_failed_thread_setup_releases_reservation(self):
+        with (
+            patch.object(server.TicketManager, "reserve_thread_creation", AsyncMock(return_value={"status": "reserved"})),
+            patch.object(server.TicketManager, "release_thread_creation", AsyncMock()) as release,
+            patch.object(server, "ready_guild", AsyncMock(side_effect=server.HTTPException(status_code=503, detail="offline"))),
+        ):
+            response = self.client.post(
+                "/tickets/create-thread",
+                headers={"X-Internal-Secret": "bridge-secret"},
+                json={"ticket_id": "tkt-1", "category": "support", "title": "Help", "creator_uid": "uid-1"},
+            )
+        self.assertEqual(response.status_code, 503)
+        release.assert_awaited_once_with("tkt-1")
+
     def test_relay_validates_link_and_sends_message(self):
         ticket = SimpleNamespace(thread_id="333", discord_meta=None)
         with (
@@ -308,6 +316,27 @@ class BridgeTests(unittest.TestCase):
         self.assertIn("Hello", sent)
         self.assertIn("https://example.test/file", sent)
 
+    def test_thread_creator_must_have_this_uid_verified(self):
+        discord_id = "555"
+        email = "member@sst.scaler.com"
+        records = {
+            "uid-1": {"email": email, "discord_id": discord_id, "discord_link_version": 1},
+            discord_id: {"email": email, "discord_id": discord_id, "discord_link_version": 1, "firebase_uid": "uid-2"},
+            email: {"email": email, "discord_id": discord_id, "discord_link_version": 1, "firebase_uid": "uid-2"},
+        }
+        db = MagicMock()
+        def document(key):
+            data = records.get(key)
+            return SimpleNamespace(get=lambda: SimpleNamespace(exists=data is not None, to_dict=lambda: data))
+        db.collection.return_value.document.side_effect = document
+        with patch.object(server, "get_firestore_client", return_value=db):
+            with self.assertRaises(server.HTTPException) as error:
+                asyncio.run(server.user_discord_id("uid-1"))
+            self.assertEqual(error.exception.status_code, 409)
+            records[discord_id]["firebase_uid"] = "uid-1"
+            records[email]["firebase_uid"] = "uid-1"
+            self.assertEqual(asyncio.run(server.user_discord_id("uid-1")), discord_id)
+
 
 class IdeaContractTests(unittest.TestCase):
     def test_idea_dual_writes_dashboard_contract(self):
@@ -315,7 +344,7 @@ class IdeaContractTests(unittest.TestCase):
             title="Idea",
             description="Description",
             track="other",
-            roadmap=["Step one"],
+            rough_roadmap=["Step one"],
             is_approved=True,
             created_by_uid="uid-1",
             created_by=TicketUser(discord_id="555", username="Member"),
@@ -339,13 +368,13 @@ class IdeaContractTests(unittest.TestCase):
         )
         self.assertTrue(idea.is_approved)
         self.assertEqual(idea.roadmap, ["Step one"])
-        self.assertEqual(idea.track, "other")
+        self.assertEqual(idea.track, "misc")
 
     def test_idea_normalizes_optional_dashboard_display_fields(self):
         idea = Idea.from_dict(
             "idea-1", {"title": "Idea", "track": None, "difficulty": None}
         )
-        self.assertEqual(idea.track, "other")
+        self.assertEqual(idea.track, "misc")
         self.assertEqual(idea.difficulty, "intermediate")
 
     def test_manager_unions_canonical_and_legacy_approval_fields(self):
@@ -365,6 +394,23 @@ class IdeaContractTests(unittest.TestCase):
 
 
 class TicketContractTests(unittest.TestCase):
+    def test_existing_legacy_thread_is_not_created_again(self):
+        db = MagicMock()
+        ticket_ref = db.collection.return_value.document.return_value
+        ticket_ref.get.return_value = SimpleNamespace(
+            exists=True,
+            to_dict=lambda: {
+                "discord_meta": {"guild_id": "111", "channel_id": "222", "thread_id": "333"}
+            },
+        )
+        with (
+            patch.object(TicketManager, "_get_db", return_value=db),
+            patch("utils.ticket_manager.firestore.transactional", side_effect=lambda fn: fn),
+        ):
+            result = asyncio.run(TicketManager.reserve_thread_creation("ticket-1"))
+        self.assertEqual(result["status"], "existing")
+        db.transaction.return_value.update.assert_not_called()
+
     def test_dashboard_identity_fields_are_read(self):
         ticket = Ticket.from_dict(
             "ticket-1", {"created_by_uid": "uid-1", "category": "feedback"}
@@ -384,7 +430,10 @@ class TicketContractTests(unittest.TestCase):
             content="Hello",
             discord_message_id="987654321",
         )
-        with patch.object(TicketManager, "_get_db", return_value=db):
+        with (
+            patch.object(TicketManager, "_get_db", return_value=db),
+            patch("utils.ticket_manager.APIClient.post", AsyncMock(return_value=None)),
+        ):
             message_id = asyncio.run(
                 TicketManager.add_ticket_message("ticket-1", message)
             )
@@ -392,10 +441,33 @@ class TicketContractTests(unittest.TestCase):
             message.content = "Changed replay"
             asyncio.run(TicketManager.add_ticket_message("ticket-1", message))
             messages = asyncio.run(TicketManager.get_ticket_messages("ticket-1"))
-        self.assertEqual(message_id, "987654321")
-        self.assertEqual(db.ticket.messages.requested_id, "987654321")
+        expected_id = f"msg_discord_{sha256(b'987654321').hexdigest()[:24]}"
+        self.assertEqual(message_id, expected_id)
+        self.assertEqual(db.ticket.messages.requested_id, expected_id)
         self.assertEqual(db.ticket.messages.saved, original)
         self.assertEqual([item.id for item in messages], ["old", "new"])
+
+    def test_bot_sync_response_does_not_write_a_duplicate_message(self):
+        message = TicketMessage(sender_id="discord-user", sender_name="Member", content="Hello", discord_message_id="987654321")
+        with (
+            patch("utils.ticket_manager.APIClient.post", AsyncMock(return_value={"success": True, "message_id": "msg_discord_existing"})),
+            patch.object(TicketManager, "_get_db", side_effect=AssertionError("fallback must not write")),
+        ):
+            message_id = asyncio.run(TicketManager.add_ticket_message("ticket-1", message))
+        self.assertEqual(message_id, "msg_discord_existing")
+
+    def test_discord_ticket_fallback_records_verified_creator_uid(self):
+        db = MagicMock()
+        db.collection.return_value.document.return_value.id = "ticket-1"
+        ticket = Ticket(created_by=TicketUser(discord_id="555", username="Member"))
+        with (
+            patch("utils.ticket_manager.APIClient.post", AsyncMock(return_value=None)),
+            patch("utils.ticket_manager.verified_uid_for_discord", return_value="uid-1"),
+            patch.object(TicketManager, "_get_db", return_value=db),
+        ):
+            ticket_id = asyncio.run(TicketManager.create_ticket(ticket))
+        self.assertEqual(ticket_id, "ticket-1")
+        self.assertEqual(db.collection.return_value.document.return_value.set.call_args.args[0]["created_by_uid"], "uid-1")
 
 
 if __name__ == "__main__":
