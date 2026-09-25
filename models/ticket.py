@@ -9,6 +9,7 @@ class TicketCategory(str, Enum):
     RESOURCE_REQUEST = "resource_request"
     SUPPORT = "support"
     IDEA_JAR = "idea_jar"
+    FEEDBACK = "feedback"
     REPORT = "report"
     MISC = "misc"
 
@@ -19,6 +20,7 @@ class TicketCategory(str, Enum):
             TicketCategory.RESOURCE_REQUEST: "⚡ Resource Request",
             TicketCategory.SUPPORT: "💬 Support & General Inquiries",
             TicketCategory.IDEA_JAR: "💡 Idea Jar & Suggestions",
+            TicketCategory.FEEDBACK: "📝 General Feedback & Suggestions",
             TicketCategory.REPORT: "🛡️ Report Issue / Misconduct",
             TicketCategory.MISC: "📦 General / Misc"
         }
@@ -31,6 +33,7 @@ class TicketCategory(str, Enum):
             TicketCategory.RESOURCE_REQUEST: "resource",
             TicketCategory.SUPPORT: "support",
             TicketCategory.IDEA_JAR: "idea",
+            TicketCategory.FEEDBACK: "feedback",
             TicketCategory.REPORT: "report",
             TicketCategory.MISC: "misc"
         }
@@ -43,6 +46,7 @@ class TicketCategory(str, Enum):
             TicketCategory.RESOURCE_REQUEST: "⚡",
             TicketCategory.SUPPORT: "💬",
             TicketCategory.IDEA_JAR: "💡",
+            TicketCategory.FEEDBACK: "📝",
             TicketCategory.REPORT: "🛡️",
             TicketCategory.MISC: "📦"
         }
@@ -55,6 +59,7 @@ class TicketCategory(str, Enum):
             TicketCategory.RESOURCE_REQUEST: "Request GPU/Compute, hardware, API credits, or mentorship (SPG only)",
             TicketCategory.SUPPORT: "Get help with club activities, roles, events, or tracks",
             TicketCategory.IDEA_JAR: "Submit project ideas or suggest improvements for the club",
+            TicketCategory.FEEDBACK: "Share feedback or suggestions to improve the club",
             TicketCategory.REPORT: "Confidential reports regarding rule violations or misconduct",
             TicketCategory.MISC: "Other questions or inquiries"
         }
@@ -92,6 +97,7 @@ class TicketUser:
     discriminator: Optional[str] = None
     email: Optional[str] = None
     avatar_url: Optional[str] = None
+    uid: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -99,7 +105,8 @@ class TicketUser:
             "username": self.username,
             "discriminator": self.discriminator,
             "email": self.email,
-            "avatar_url": self.avatar_url
+            "avatar_url": self.avatar_url,
+            "uid": self.uid
         }
 
     @classmethod
@@ -111,7 +118,8 @@ class TicketUser:
             username=data.get("username", "Unknown"),
             discriminator=data.get("discriminator"),
             email=data.get("email"),
-            avatar_url=data.get("avatar_url")
+            avatar_url=data.get("avatar_url"),
+            uid=data.get("uid")
         )
 
 
@@ -197,9 +205,13 @@ class Ticket:
     status: TicketStatus = TicketStatus.OPEN
     priority: TicketPriority = TicketPriority.MEDIUM
     created_by: Optional[TicketUser] = None
+    created_by_uid: Optional[str] = None
     assigned_to: Optional[TicketUser] = None
+    assigned_to_uid: Optional[str] = None
     closed_by: Optional[TicketUser] = None
+    closed_by_uid: Optional[str] = None
     close_reason: Optional[str] = None
+    spg_id: Optional[str] = None
     discord_meta: Optional[DiscordMeta] = None
     thread_id: Optional[str] = None
     guild_id: Optional[str] = None
@@ -208,10 +220,12 @@ class Ticket:
     closed_at: Optional[Any] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        # Sync thread_id and guild_id from discord_meta if not set directly
         tid = self.thread_id or (self.discord_meta.thread_id if self.discord_meta else None)
         gid = self.guild_id or (self.discord_meta.guild_id if self.discord_meta else None)
-        
+        c_uid = self.created_by_uid or (self.created_by.uid if self.created_by else None)
+        a_uid = self.assigned_to_uid or (self.assigned_to.uid if self.assigned_to else None)
+        cl_uid = self.closed_by_uid or (self.closed_by.uid if self.closed_by else None)
+
         data = {
             "category": self.category.value if isinstance(self.category, TicketCategory) else str(self.category),
             "title": self.title,
@@ -220,9 +234,13 @@ class Ticket:
             "status": self.status.value if isinstance(self.status, TicketStatus) else str(self.status),
             "priority": self.priority.value if isinstance(self.priority, TicketPriority) else str(self.priority),
             "created_by": self.created_by.to_dict() if self.created_by else None,
+            "created_by_uid": c_uid,
             "assigned_to": self.assigned_to.to_dict() if self.assigned_to else None,
+            "assigned_to_uid": a_uid,
             "closed_by": self.closed_by.to_dict() if self.closed_by else None,
+            "closed_by_uid": cl_uid,
             "close_reason": self.close_reason,
+            "spg_id": self.spg_id,
             "discord_meta": self.discord_meta.to_dict() if self.discord_meta else None,
             "thread_id": tid,
             "guild_id": gid,
@@ -265,9 +283,13 @@ class Ticket:
             status=status,
             priority=priority,
             created_by=TicketUser.from_dict(data.get("created_by")),
+            created_by_uid=data.get("created_by_uid"),
             assigned_to=TicketUser.from_dict(data.get("assigned_to")),
+            assigned_to_uid=data.get("assigned_to_uid"),
             closed_by=TicketUser.from_dict(data.get("closed_by")),
+            closed_by_uid=data.get("closed_by_uid"),
             close_reason=data.get("close_reason"),
+            spg_id=data.get("spg_id"),
             discord_meta=discord_meta,
             thread_id=thread_id,
             guild_id=guild_id,

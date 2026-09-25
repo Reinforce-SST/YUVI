@@ -38,6 +38,12 @@ class TicketCategorySelect(ui.Select):
                 emoji="💡"
             ),
             discord.SelectOption(
+                label="Feedback & Suggestions",
+                value=TicketCategory.FEEDBACK.value,
+                description="Share feedback or suggestions to improve the club",
+                emoji="📝"
+            ),
+            discord.SelectOption(
                 label="Report Issue / Misconduct",
                 value=TicketCategory.REPORT.value,
                 description="Confidential report for server/club misconduct or disputes",
@@ -69,6 +75,9 @@ class TicketCategorySelect(ui.Select):
             await interaction.response.send_modal(SupportInquiryModal())
         elif selected_value == TicketCategory.IDEA_JAR.value:
             await interaction.response.send_modal(IdeaJarModal())
+        elif selected_value == TicketCategory.FEEDBACK.value:
+            from views.ticket_modals import FeedbackModal
+            await interaction.response.send_modal(FeedbackModal())
         elif selected_value == TicketCategory.REPORT.value:
             await interaction.response.send_modal(ReportModal())
         else:

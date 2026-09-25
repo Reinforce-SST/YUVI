@@ -221,3 +221,139 @@ async def _assign_verified_role(guild, payload):
         "role_assigned": role_assigned
     }
 
+
+class RelayMessageRequest(BaseModel):
+    ticket_id: str
+    thread_id: str
+    sender_uid: Optional[str] = None
+    sender_name: Optional[str] = None
+    content: str
+    attachments: Optional[list[str]] = None
+    secret: Optional[str] = None
+
+
+@app.post("/internal/tickets/relay-message")
+@app.post("/internal/tickets/message-out")
+async def relay_ticket_message(
+    payload: RelayMessageRequest,
+    x_internal_secret: Optional[str] = Header(None)
+):
+    """Internal webhook called when a user or admin posts a message on the Web Dashboard."""
+    expected_secret = os.getenv("BOT_INTERNAL_SECRET")
+    if expected_secret:
+        provided = payload.secret or x_internal_secret
+        if provided != expected_secret:
+            raise HTTPException(status_code=401, detail="Unauthorized: Invalid internal secret")
+
+    if not bot.is_ready():
+        raise HTTPException(status_code=503, detail="Discord bot not ready")
+
+    try:
+        thread_id_int = int(payload.thread_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid thread_id format")
+
+    channel = bot.get_channel(thread_id_int)
+    if not channel:
+        try:
+            channel = await bot.fetch_channel(thread_id_int)
+        except Exception as e:
+            raise HTTPException(status_code=404, detail=f"Thread channel not found: {e}")
+
+    if not isinstance(channel, (discord.Thread, discord.TextChannel)):
+        raise HTTPException(status_code=400, detail="Target channel is not a text thread")
+
+    sender = payload.sender_name or "Web Member"
+    embed = discord.Embed(
+        description=payload.content,
+        color=0x5865F2
+    )
+    embed.set_author(name=f"{sender} (via Dashboard)", icon_url="https://cdn.discordapp.com/embed/avatars/0.png")
+
+    if payload.attachments:
+        for idx, att_url in enumerate(payload.attachments, 1):
+            embed.add_field(name=f"Attachment {idx}", value=f"[Download / View File]({att_url})", inline=False)
+
+    await channel.send(embed=embed)
+    return {"success": True, "ticket_id": payload.ticket_id}
+
+
+class CreateThreadRequest(BaseModel):
+    ticket_id: str
+    category: str
+    title: str
+    creator_uid: Optional[str] = None
+    fields: Optional[dict] = None
+    secret: Optional[str] = None
+
+
+@app.post("/internal/tickets/create-thread")
+@app.post("/internal/tickets/thread-create")
+async def create_ticket_thread(
+    payload: CreateThreadRequest,
+    x_internal_secret: Optional[str] = Header(None)
+):
+    """Internal webhook called when a ticket is created from the Web Dashboard."""
+    expected_secret = os.getenv("BOT_INTERNAL_SECRET")
+    if expected_secret:
+        provided = payload.secret or x_internal_secret
+        if provided != expected_secret:
+            raise HTTPException(status_code=401, detail="Unauthorized: Invalid internal secret")
+
+    if not bot.is_ready():
+        raise HTTPException(status_code=503, detail="Discord bot not ready")
+
+    guild_id_env = os.getenv("GUILD_ID")
+    guild = bot.get_guild(int(guild_id_env)) if (guild_id_env and guild_id_env.isdigit()) else None
+    if not guild and bot.guilds:
+        guild = bot.guilds[0]
+
+    if not guild:
+        raise HTTPException(status_code=500, detail="Guild not found")
+
+    tickets_ch_id = os.getenv("TICKETS_CHANNEL_ID")
+    target_channel = guild.get_channel(int(tickets_ch_id)) if (tickets_ch_id and tickets_ch_id.isdigit()) else None
+    if not target_channel:
+        target_channel = guild.text_channels[0] if guild.text_channels else None
+
+    if not target_channel:
+        raise HTTPException(status_code=500, detail="No valid text channel found for thread creation")
+
+    thread_name = f"ticket-{payload.category[:6]}-{payload.ticket_id[:6]}"
+    try:
+        thread = await target_channel.create_thread(
+            name=thread_name,
+            auto_archive_duration=10080,
+            type=discord.ChannelType.private_thread,
+            reason=f"Web Ticket: {payload.ticket_id}"
+        )
+    except Exception:
+        thread = await target_channel.create_thread(
+            name=thread_name,
+            auto_archive_duration=10080,
+            reason=f"Web Ticket: {payload.ticket_id}"
+        )
+
+    # Post initial header embed
+    from views.ticket_controls import TicketControlView
+    embed = discord.Embed(
+        title=f"🎫 {payload.title}",
+        description=f"Ticket opened via Web Dashboard.\n**Category:** `{payload.category}`\n**Ticket ID:** `{payload.ticket_id}`",
+        color=0x5865F2
+    )
+    if payload.fields:
+        for k, v in payload.fields.items():
+            embed.add_field(name=f"📌 {k}", value=str(v)[:1024], inline=False)
+
+    await thread.send(embed=embed, view=TicketControlView())
+
+    return {
+        "success": True,
+        "ticket_id": payload.ticket_id,
+        "discord_meta": {
+            "guild_id": str(guild.id),
+            "channel_id": str(target_channel.id),
+            "thread_id": str(thread.id),
+            "thread_url": f"https://discord.com/channels/{guild.id}/{thread.id}"
+        }
+    }

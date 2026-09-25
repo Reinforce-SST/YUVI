@@ -1,9 +1,11 @@
 import asyncio
 from typing import Any, Dict, Optional
 from firebase_admin import firestore
+from utils.api_client import APIClient
 from utils.firestore_client import get_firestore_client
 
 USERS_COLLECTION = "users"
+
 
 class UserManager:
     @staticmethod
@@ -12,30 +14,39 @@ class UserManager:
 
     @classmethod
     async def get_user(cls, discord_id: str) -> Optional[Dict[str, Any]]:
-        """Fetch user record from Firestore by Discord ID (field search or doc ID)."""
+        """Fetch user record via FastAPI Backend (/api/v1/users?discord_id=...) with fallback."""
+        clean_id = str(discord_id).strip()
+
+        # 1. Query via Backend API
+        res = await APIClient.get("users", params={"discord_id": clean_id})
+        if res and res.get("items"):
+            return res["items"][0]
+
+        # 2. Fallback direct API lookup by ID
+        res_direct = await APIClient.get(f"users/{clean_id}")
+        if res_direct and res_direct.get("id"):
+            return res_direct
+
+        # 3. Direct Firestore Fallback
         def _sync_get():
             try:
                 db = cls._get_db()
-                
-                # 1. Query by discord_id field (string)
-                query = db.collection(USERS_COLLECTION).where("discord_id", "==", str(discord_id).strip()).limit(1)
+                query = db.collection(USERS_COLLECTION).where("discord_id", "==", clean_id).limit(1)
                 docs = list(query.stream())
                 if docs:
                     data = docs[0].to_dict()
                     data["doc_id"] = docs[0].id
                     return data
 
-                # 2. Query by discord_id field (integer)
-                if str(discord_id).strip().isdigit():
-                    query_int = db.collection(USERS_COLLECTION).where("discord_id", "==", int(discord_id.strip())).limit(1)
+                if clean_id.isdigit():
+                    query_int = db.collection(USERS_COLLECTION).where("discord_id", "==", int(clean_id)).limit(1)
                     docs_int = list(query_int.stream())
                     if docs_int:
                         data = docs_int[0].to_dict()
                         data["doc_id"] = docs_int[0].id
                         return data
 
-                # 3. Direct document lookup by discord_id / email
-                doc = db.collection(USERS_COLLECTION).document(str(discord_id).strip()).get()
+                doc = db.collection(USERS_COLLECTION).document(clean_id).get()
                 if doc.exists:
                     data = doc.to_dict()
                     data["doc_id"] = doc.id
@@ -43,29 +54,31 @@ class UserManager:
 
                 return None
             except Exception as e:
-                print(f"[UserManager] Error fetching user {discord_id}: {e}")
-                import traceback
-                traceback.print_exc()
+                print(f"[UserManager] Firestore fallback error fetching user {discord_id}: {e}")
                 return None
 
         return await asyncio.to_thread(_sync_get)
 
     @classmethod
     async def get_user_by_email(cls, email: str) -> Optional[Dict[str, Any]]:
-        """Query user record from Firestore by email (document ID or email field)."""
+        """Query user record from API by email with Firestore fallback."""
+        clean_email = str(email).lower().strip()
+
+        # 1. Query via Backend API
+        res = await APIClient.get(f"users/{clean_email}")
+        if res and res.get("id"):
+            return res
+
+        # 2. Direct Firestore Fallback
         def _sync_query():
             try:
                 db = cls._get_db()
-                clean_email = str(email).lower().strip()
-
-                # 1. Direct document lookup by email
                 doc = db.collection(USERS_COLLECTION).document(clean_email).get()
                 if doc.exists:
                     data = doc.to_dict()
                     data["doc_id"] = doc.id
                     return data
 
-                # 2. Query by email field
                 query = db.collection(USERS_COLLECTION).where("email", "==", clean_email).limit(1)
                 docs = list(query.stream())
                 if docs:
@@ -75,23 +88,20 @@ class UserManager:
 
                 return None
             except Exception as e:
-                print(f"[UserManager] Error querying user by email {email}: {e}")
-                import traceback
-                traceback.print_exc()
+                print(f"[UserManager] Firestore fallback error querying email {email}: {e}")
                 return None
 
         return await asyncio.to_thread(_sync_query)
 
     @classmethod
     async def unlink_user(cls, discord_id: str) -> bool:
-        """Unlink Discord ID from user record in Firestore and set is_verified to False."""
+        """Unlink Discord ID from user record in Firestore and clear verification status."""
         def _sync_unlink():
             try:
                 db = cls._get_db()
                 clean_id = str(discord_id).strip()
                 unlinked = False
 
-                # 1. Query by discord_id field (string)
                 query_str = db.collection(USERS_COLLECTION).where("discord_id", "==", clean_id)
                 for doc in query_str.stream():
                     doc.reference.update({
@@ -102,10 +112,8 @@ class UserManager:
                         "social_links.discord": None,
                         "updated_at": firestore.SERVER_TIMESTAMP
                     })
-                    print(f"[UserManager] Unlinked discord_id from user doc '{doc.id}'")
                     unlinked = True
 
-                # 2. Query by discord_id field (integer)
                 if clean_id.isdigit():
                     query_int = db.collection(USERS_COLLECTION).where("discord_id", "==", int(clean_id))
                     for doc in query_int.stream():
@@ -117,21 +125,17 @@ class UserManager:
                             "social_links.discord": None,
                             "updated_at": firestore.SERVER_TIMESTAMP
                         })
-                        print(f"[UserManager] Unlinked int discord_id from user doc '{doc.id}'")
                         unlinked = True
 
-                # 3. Direct document by discord_id if it was keyed by Discord ID
                 direct_doc = db.collection(USERS_COLLECTION).document(clean_id)
                 if direct_doc.get().exists:
                     direct_doc.delete()
-                    print(f"[UserManager] Deleted direct user doc '{clean_id}'")
                     unlinked = True
 
                 return unlinked
             except Exception as e:
                 print(f"[UserManager] Error unlinking user {discord_id}: {e}")
-                import traceback
-                traceback.print_exc()
                 return False
 
         return await asyncio.to_thread(_sync_unlink)
+

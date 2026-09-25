@@ -195,10 +195,10 @@ class SPGModal(ui.Modal, title="🚀 SPG Registration / Modification"):
 
     async def on_submit(self, interaction: discord.Interaction):
         fields = {
-            "Project Name & Track": self.project_name.value,
-            "Team Members": self.team_members.value,
-            "Duration & Frequency": self.duration.value,
-            "Summary & Goals": self.objectives.value
+            "project_name": self.project_name.value,
+            "team_members": self.team_members.value,
+            "duration": self.duration.value,
+            "goals": self.objectives.value
         }
         await create_ticket_thread_and_doc(
             interaction=interaction,
@@ -239,10 +239,10 @@ class ResourceRequestModal(ui.Modal, title="⚡ Resource Request (SPGs Only)"):
 
     async def on_submit(self, interaction: discord.Interaction):
         fields = {
-            "SPG Name": self.project_name.value,
-            "Resources Requested": self.resources_needed.value,
-            "Progress Proof": self.progress_proof.value,
-            "Justification": self.justification.value
+            "project_name": self.project_name.value,
+            "resources_needed": self.resources_needed.value,
+            "progress_proof_url": self.progress_proof.value,
+            "justification": self.justification.value
         }
         await create_ticket_thread_and_doc(
             interaction=interaction,
@@ -270,8 +270,8 @@ class SupportInquiryModal(ui.Modal, title="💬 Support & General Inquiries"):
 
     async def on_submit(self, interaction: discord.Interaction):
         fields = {
-            "Subject": self.subject.value,
-            "Details": self.details.value
+            "subject": self.subject.value,
+            "details": self.details.value
         }
         await create_ticket_thread_and_doc(
             interaction=interaction,
@@ -305,15 +305,44 @@ class IdeaJarModal(ui.Modal, title="💡 Idea Jar & Suggestions"):
 
     async def on_submit(self, interaction: discord.Interaction):
         fields = {
-            "Idea Title": self.idea_title.value,
-            "Track": self.track.value,
-            "Overview": self.overview.value
+            "idea_title": self.idea_title.value,
+            "track": self.track.value,
+            "overview": self.overview.value
         }
         await create_ticket_thread_and_doc(
             interaction=interaction,
             category=TicketCategory.IDEA_JAR,
             title=f"Idea Jar: {self.idea_title.value}",
             description=self.overview.value,
+            fields=fields
+        )
+
+
+class FeedbackModal(ui.Modal, title="📝 Feedback & Suggestions"):
+    topic = ui.TextInput(
+        label="Feedback Topic",
+        placeholder="e.g., Workshop pacing, Discord channels, Website UX",
+        max_length=100,
+        required=True
+    )
+    comments = ui.TextInput(
+        label="Feedback & Details",
+        placeholder="Share what worked well and what we can improve...",
+        style=discord.TextStyle.paragraph,
+        max_length=1000,
+        required=True
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        fields = {
+            "topic": self.topic.value,
+            "comments": self.comments.value
+        }
+        await create_ticket_thread_and_doc(
+            interaction=interaction,
+            category=TicketCategory.FEEDBACK,
+            title=f"Feedback: {self.topic.value}",
+            description=self.comments.value,
             fields=fields
         )
 
@@ -335,8 +364,8 @@ class ReportModal(ui.Modal, title="🛡️ Report Issue / Misconduct (Confidenti
 
     async def on_submit(self, interaction: discord.Interaction):
         fields = {
-            "Incident Summary": self.summary.value,
-            "Report Details": self.description.value
+            "incident_summary": self.summary.value,
+            "confidential_details": self.description.value
         }
         await create_ticket_thread_and_doc(
             interaction=interaction,
@@ -364,8 +393,8 @@ class MiscModal(ui.Modal, title="📦 General Ticket"):
 
     async def on_submit(self, interaction: discord.Interaction):
         fields = {
-            "Subject": self.subject.value,
-            "Details": self.details.value
+            "subject": self.subject.value,
+            "details": self.details.value
         }
         await create_ticket_thread_and_doc(
             interaction=interaction,
