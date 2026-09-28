@@ -130,3 +130,39 @@ class DiscordQueueTests(unittest.IsolatedAsyncioTestCase):
         await self.queue.drain(timeout=1.0)
 
         member.add_roles.assert_awaited_once_with(role, reason="Test grant")
+
+
+class DiscordQueueLifecycleTests(unittest.TestCase):
+    def test_restart_in_a_new_event_loop_processes_messages(self):
+        queue = DiscordQueueManager(MagicMock())
+        member = MagicMock()
+        member.send = AsyncMock()
+        channel = MagicMock()
+        channel.send = AsyncMock()
+
+        async def first_run():
+            queue.start()
+            await asyncio.sleep(0)
+            await queue.stop(timeout=1.0)
+
+        async def second_run():
+            queue.start()
+            try:
+                await asyncio.sleep(0)
+                self.assertTrue(all(not worker.done() for worker in queue._workers))
+                await queue.enqueue(DiscordTask(
+                    task_type="direct_message",
+                    payload={"member": member, "content": "Hello after restart"},
+                ))
+                await queue.enqueue(DiscordTask(
+                    task_type="thread_message",
+                    payload={"channel": channel, "content": "Thread after restart"},
+                ))
+                await queue.drain(timeout=1.0)
+            finally:
+                await queue.stop(timeout=1.0)
+
+        asyncio.run(first_run())
+        asyncio.run(second_run())
+        member.send.assert_awaited_once_with(content="Hello after restart", embed=None)
+        channel.send.assert_awaited_once_with(content="Thread after restart", embed=None)

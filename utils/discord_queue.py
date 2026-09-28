@@ -52,10 +52,17 @@ class DiscordQueueManager:
         except asyncio.TimeoutError:
             logger.warning("[DiscordQueue] Timed out waiting for tasks to drain.")
         finally:
-            for w in self._workers:
+            workers = self._workers
+            for w in workers:
                 if not w.done():
                     w.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
             self._workers.clear()
+            # asyncio.Queue binds to the event loop that waited on it. A new
+            # lifespan must use fresh queues after the previous loop stops.
+            self.action_queue = asyncio.Queue()
+            self.dm_queue = asyncio.Queue()
+            self._in_flight.clear()
             logger.info("[DiscordQueue] Background workers stopped.")
 
     async def drain(self, timeout: float = 5.0):
