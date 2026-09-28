@@ -22,7 +22,7 @@ is the source of truth for documents crossing that boundary.
 |---|---|
 | [Ticket bridge PR #10](https://github.com/Reinforce-SST/YUVI/pull/10) | Merged into `main` |
 | [Queue/bridge repair PR #13](https://github.com/Reinforce-SST/YUVI/pull/13) | Open; needed after a later queue merge caused dashboard thread requests to return 422 |
-| [Dashboard review PR #37](https://github.com/Reinforce-SST/Reinforce-Student-Dashboard/pull/37) | Open; adds admin SPG approval and three mobile dashboard layouts |
+| [Dashboard review PR #37](https://github.com/Reinforce-SST/Reinforce-Student-Dashboard/pull/37) | Open; adds admin SPG approval and the selected mobile Command Home layout |
 | [Hosted Render health](https://yuvi-182k.onrender.com/health) | Returned HTTP 503 |
 | [Dashboard API health](https://api.reinforce-sst.com/health) | Returned HTTP 200 |
 
