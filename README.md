@@ -22,6 +22,7 @@ is the source of truth for documents crossing that boundary.
 |---|---|
 | [Ticket bridge PR #10](https://github.com/Reinforce-SST/YUVI/pull/10) | Merged into `main` |
 | [Queue/bridge repair PR #13](https://github.com/Reinforce-SST/YUVI/pull/13) | Open; needed after a later queue merge caused dashboard thread requests to return 422 |
+| [Dashboard review PR #37](https://github.com/Reinforce-SST/Reinforce-Student-Dashboard/pull/37) | Open; adds admin SPG approval and three mobile dashboard layouts |
 | [Hosted Render health](https://yuvi-182k.onrender.com/health) | Returned HTTP 503 |
 | [Dashboard API health](https://api.reinforce-sst.com/health) | Returned HTTP 200 |
 
@@ -64,9 +65,10 @@ assume this works in production until the live acceptance test passes.
 | Idea Jar | Project ideas and feedback |
 | Report | Confidential conduct or safety issue |
 
-An SPG registration is a ticket for review. Changing its ticket status does
-not create an SPG document; the dashboard API's `create_spg()` workflow is a
-separate admin operation.
+An SPG registration is a ticket for review. Changing its ticket status in
+Discord does not create an SPG document. Dashboard PR #37 adds an admin-only
+approval action that validates the stored ticket, creates one SPG, and resolves
+the ticket in the same transaction. Project groups require a proposition PDF.
 
 ## Run locally
 
