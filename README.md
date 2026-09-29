@@ -1,215 +1,114 @@
+<div align="center">
+
 # YUVI
 
-Discord bot and FastAPI backend service for Reinforce Club SST. Handles Google account authentication (@sst.scaler.com), role assignment, and a Firestore-synchronized support ticket and project management system.
+**The Discord side of Reinforce Club SST.**
 
-## Rollout status (28 September 2026)
+[Website](https://www.reinforce-sst.com/) · [Dashboard repository](https://github.com/Reinforce-SST/Reinforce-Student-Dashboard) · [API status](https://api.reinforce-sst.com/health)
 
-- [YUVI bridge PR #10](https://github.com/Reinforce-SST/YUVI/pull/10) is open. It adds the dashboard ticket bridge and uses canonical Firebase UIDs for linked Discord members. Its code passed 29 local tests and CI, but this bridge is **not deployed yet**.
-- The integrated dashboard baseline is on `main` via [Dashboard PR #33](https://github.com/Reinforce-SST/Reinforce-Student-Dashboard/pull/33). [Dashboard follow-up PR #35](https://github.com/Reinforce-SST/Reinforce-Student-Dashboard/pull/35) remains open. The live Vercel site still serves the legacy Vite client.
-- The [hosted YUVI health endpoint](https://yuvi-182k.onrender.com/health) currently returns a 503 owner-suspended page. The [dashboard API health endpoint](https://api.reinforce-sst.com/health) returns 200; that alone does not verify the new bridge.
-
-Before member rollout, resume YUVI, deploy the pending changes with a matching `BOT_INTERNAL_SECRET`, switch Vercel to `web/`, and test a real Google sign-in, Discord role grant, ticket thread creation, and message relay. See the [dashboard verification checklist](https://github.com/Reinforce-SST/Reinforce-Student-Dashboard/blob/main/docs/verification.md).
+</div>
 
 ---
 
-## Project Structure
+YUVI handles private college-account verification, Discord roles, support
+tickets, and the Idea Jar. Its FastAPI service lets the Reinforce dashboard
+create a Discord ticket thread and relay messages. Both repositories share
+Firestore; the [data contract](https://github.com/Reinforce-SST/Reinforce-Student-Dashboard/blob/main/docs/DATA_CONTRACT.md)
+is the source of truth for documents crossing that boundary.
 
-```text
-YUVI/
-├── cogs/
-│   ├── auth.py               # Authentication slash commands & verification views
-│   └── tickets.py            # Ticket panel, thread lifecycle & chat syncing
-├── models/
-│   ├── __init__.py
-│   └── ticket.py             # Ticket schemas, status enums & Firestore serialization
-├── utils/
-│   ├── __init__.py
-│   ├── firestore_client.py   # Shared Firestore client initializer
-│   ├── ticket_manager.py     # Async database CRUD for tickets & messages
-│   ├── transcript_generator.py # Formats chat history into text transcripts
-│   └── user_manager.py       # User profile lookups and unlinking
-├── views/
-│   ├── __init__.py
-│   ├── ticket_panel.py       # Persistent category dropdown view
-│   ├── ticket_modals.py      # Category-specific intake modals
-│   └── ticket_controls.py   # Thread controls (claim, add member, close, transcript)
-├── serviceAccountKey.json    # Firebase Admin credentials
-├── server.py                 # FastAPI application, lifecycle manager & webhook routes
-├── yuvi_bot.py               # Custom commands.Bot subclass
-├── main.py                   # Uvicorn entry point
-└── pyproject.toml            # Dependencies and project metadata
-```
+## Rollout status · 29 September 2026
 
----
+| Item | State |
+|---|---|
+| [Ticket bridge PR #10](https://github.com/Reinforce-SST/YUVI/pull/10) | Merged into `main` |
+| [Queue/bridge repair PR #13](https://github.com/Reinforce-SST/YUVI/pull/13) | Open; needed after a later queue merge caused dashboard thread requests to return 422 |
+| [Dashboard review PR #37](https://github.com/Reinforce-SST/Reinforce-Student-Dashboard/pull/37) | Open; adds admin SPG approval and the selected mobile Command Home layout |
+| [Hosted Render health](https://yuvi-182k.onrender.com/health) | Returned HTTP 503 |
+| [Dashboard API health](https://api.reinforce-sst.com/health) | Returned HTTP 200 |
 
-## Member Authentication
+The dashboard-to-Discord bridge is **not verified live**. A local passing test
+or a running bot does not establish that the API callback, secret, Discord
+permissions, and Firestore link all work on the deployed pair. Use the
+[release checklist](https://github.com/Reinforce-SST/Reinforce-Student-Dashboard/blob/main/docs/verification.md)
+after PR #13 is merged and deployed.
 
-### Workflow
-1. A user triggers `/auth`, `/login`, or clicks the button on the `/setup-auth` verification panel.
-2. The bot creates a private one-time proof from the Discord interaction. Existing members can repeat this flow to retry role assignment.
-3. The bot returns an ephemeral link button, valid for ten minutes, pointing to:
-   ```text
-   {FRONTEND_AUTH_URL}#link_token={private_one_time_token}
-   ```
-4. The user completes Google OAuth with their `@sst.scaler.com` account on the frontend.
-5. The main backend validates the Firebase token, verified email domain, one-time proof, and duplicate accounts, then atomically updates the profile in Firestore under `users/{uid}` (with `discord_id`), and issues a POST request to YUVI's internal webhook.
-6. YUVI assigns the verified role to the user and sends a confirmation DM.
+## Member flow
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor User as Discord User
-    participant Bot as YUVI Bot
-    participant Web as Frontend Portal
-    participant API as Main Backend Server
-    participant DB as Firestore
-    participant Server as YUVI FastAPI Webhook
+1. A member runs `/auth` (or uses the verification panel) in Discord. YUVI
+   sends an ephemeral, ten-minute link to `{FRONTEND_AUTH_URL}#link_token=...`.
+2. The member signs in with a verified `@sst.scaler.com` Google account. The
+   dashboard API validates the private proof and links the Firebase UID to
+   the Discord ID in Firestore.
+3. The API calls `POST /internal/verify-success` with the shared internal
+   secret. YUVI grants the Verified Member role and confirms the result.
 
-    User->>Bot: /auth or panel button
-    Bot->>DB: Create hashed proof in discord_link_tokens
-    Bot-->>User: Ephemeral link: FRONTEND_AUTH_URL#link_token=...
+The private link is a credential. Do not paste it into chat, logs, issues, or
+screenshots. Old raw Discord-ID links are not ownership proof; members should
+run `/auth` again.
 
-    User->>Web: Complete Google SSO (@sst.scaler.com)
-    Web->>API: Submit Firebase ID token + link_token
-    API->>API: Verify token & @sst.scaler.com domain
-    API->>DB: Store user document
-    API->>Server: POST /internal/verify-success
-    Server->>Bot: Grant Verified Member role & DM user
-    Server-->>API: 200 OK
-```
+## Ticket bridge
 
-### Webhook Specification
+Discord tickets and dashboard tickets use the same `tickets/{ticket_id}`
+documents and message subcollection. The dashboard API uses the private
+`POST /tickets/create-thread` and `POST /tickets/relay-message` endpoints.
+Compatibility aliases under `/internal/tickets/` exist for older callers.
+All bridge requests require `X-Internal-Secret` matching `BOT_INTERNAL_SECRET`.
+Thread creation is designed to resume partial setup without creating a second
+thread. PR #13 repairs the endpoint registration on current `main`; do not
+assume this works in production until the live acceptance test passes.
 
-- **Endpoint**: `POST /internal/verify-success`
-- **Headers**: `X-Internal-Secret: <string>` (required; missing server configuration fails closed)
-- **Body**:
-  ```json
-  {
-    "discord_id": "123456789012345678",
-    "email": "student@sst.scaler.com",
-    "name": "Full Name"
-  }
-  ```
-- **Response**:
-  ```json
-  {
-    "success": true,
-    "discord_id": "123456789012345678",
-    "email": "student@sst.scaler.com",
-    "role_granted": "Verified Member",
-    "role_assigned": true
-  }
-  ```
+| Category | Typical request |
+|---|---|
+| SPG registration | Team, track, duration, reporting cadence |
+| Resource request | Compute, equipment, credits, mentorship |
+| Support | Questions and access problems |
+| Idea Jar | Project ideas and feedback |
+| Report | Confidential conduct or safety issue |
 
----
+An SPG registration is a ticket for review. Changing its ticket status in
+Discord does not create an SPG document. Dashboard PR #37 adds an admin-only
+approval action that validates the stored ticket, creates one SPG, and resolves
+the ticket in the same transaction. Project groups require a proposition PDF.
 
-## Ticket & SPG System
+## Run locally
 
-Tickets are stored in Firestore under `tickets/{ticket_id}` and conversations are recorded in `tickets/{ticket_id}/messages/{message_id}` in real time. This keeps Discord threads and the web dashboard in sync.
-
-The dashboard bridge accepts `POST /tickets/create-thread` to create a private
-Discord thread for an existing ticket and `POST /tickets/relay-message` to post a
-dashboard message to its linked thread. Both require `X-Internal-Secret` matching
-`BOT_INTERNAL_SECRET`. The older `/internal/tickets/*` aliases use the same checks.
-Thread creation reserves the ticket before calling Discord and can resume a
-partially completed setup without creating a duplicate thread.
-
-### Categories & Modals
-
-| Category | Purpose | Modal Fields |
-|---|---|---|
-| **SPG Registration / Modification** | Register or update a Student Project Group | Project Name & Track, Team Leader UID (mandatory club member), Team Member UIDs (optional, newline-separated, up to 6), Duration (in days), Report Frequency (in days) |
-| **Resource Request** | Request compute/GPU, hardware, API credits, mentorship | Project Name, Resources Needed, Progress Proof Links, Justification |
-| **Support & Inquiries** | General questions regarding club tracks, events, activities | Subject, Details |
-| **Idea Jar & Suggestions** | Propose ideas for others to build or general club feedback | Idea Title, Track, Learning Objectives & Description |
-| **Report Issue / Misconduct** | Confidential reports for rule violations or disputes | Incident Summary, Confidential Details |
-| **General / Misc** | Miscellaneous requests | Subject, Details |
-
----
-
-## Commands Reference
-
-### Authentication Commands
-- `/setup-auth [channel]`: Deploys the persistent verification panel with a click-to-verify button. (Admin)
-- `/auth` (or `/login`): Sends an ephemeral login link to the user.
-- `/whois <member>`: Displays linked Google account information from Firestore. (Admin)
-- `/whois-email <email>`: Looks up which Discord ID is linked to a given student email. (Admin)
-- `/unlink <member>`: Deletes the user's Firestore record and strips their verified role. (Admin)
-
-### Ticket Commands
-- `/setup-tickets [channel]`: Deploys the ticket creation panel with the category dropdown. (Admin)
-- `/ticket close [reason]`: Closes the ticket, archives the thread, and generates a transcript.
-- `/ticket claim`: Assigns the current ticket to the executing admin/lead.
-- `/ticket add <member>`: Adds another member to the private ticket thread.
-- `/ticket remove <member>`: Removes a member from the private ticket thread.
-- `/ticket transcript`: Exports and sends the full text transcript of the active ticket.
-- `/ticket info`: Displays database metadata for the active ticket.
-- `/ticket list [status] [category]`: Lists tickets matching filter criteria from Firestore. (Admin)
-
-### Idea Jar Commands
-- `/setup-ideajar [channel]`: Deploys the persistent Idea Jar panel with "Get Random Idea" and "Submit an Idea" buttons. (Admin)
-- `/idea get <idea_id>`: Displays full details of an idea by its unique ID.
-- `/idea random [track] [difficulty]`: Pulls a random approved project idea from the Idea Jar.
-- `/idea list [track] [status]`: Lists ideas matching filter criteria.
-- `/idea approve <idea_id>`: Approves a submitted user idea. (Admin)
-- `/idea delete <idea_id>`: Deletes an idea from the database. (Admin)
-
----
-
-## Setup & Execution
-
-### 1. Environment Configuration
-Copy `.env.example` to `.env` and configure the values:
+Use Python 3.13+ and [uv](https://docs.astral.sh/uv/). Copy `.env.example` to
+`.env` and fill in your own Discord, Firebase, and bridge values. Never commit
+the `.env` file or a service account key.
 
 ```bash
 cp .env.example .env
+uv sync --locked
+uv run --locked python -m unittest discover -s tests -v
+uv run --locked python main.py
 ```
 
-Key variables:
-- `DISCORD_TOKEN`: Discord Bot Token.
-- `GUILD_ID`: Target Discord server ID.
-- `VERIFIED_ROLE_ID`: Role ID to assign upon successful authentication.
-- `KICKOFF_ROLE_ID`: Optional kickoff/orientation role ID assigned alongside verified role.
-- `FRONTEND_AUTH_URL`: Base URL for the frontend Google auth page.
-- `TICKETS_CHANNEL_ID`: Channel where private ticket threads are opened.
-- `ADMIN_ROLE_ID` / `SUPPORT_ROLE_ID`: Staff role IDs for alerts and ticket management.
-- `TRANSCRIPTS_CHANNEL_ID`: Channel ID to upload transcripts upon ticket closure.
-- `BOT_INTERNAL_SECRET`: Required shared secret for the `/internal/verify-success` webhook.
-- `GOOGLE_APPLICATION_CREDENTIALS`: Path to Firebase service account JSON.
+`HOST` and `PORT` control the FastAPI listener; `.env.example` uses port 8001.
+`0.0.0.0` binds all interfaces. Restrict public access with the host firewall
+or reverse proxy. The local API and bot start together; use one bot instance
+per Discord token.
 
-### 2. Running the Application
-Start the Uvicorn server (which concurrently manages the FastAPI endpoints and Discord bot):
+| Variable | Purpose |
+|---|---|
+| `DISCORD_TOKEN`, `GUILD_ID` | Bot identity and server |
+| `VERIFIED_ROLE_ID` | Role granted after verified linking |
+| `FRONTEND_AUTH_URL` | Next.js `/auth` route, including its path |
+| `BOT_INTERNAL_SECRET` | Shared secret with the dashboard API |
+| `API_BASE_URL` | Dashboard API `/api/v1` base |
+| `TICKETS_CHANNEL_ID` | Parent channel for private threads |
+| `GOOGLE_APPLICATION_CREDENTIALS` or `FIREBASE_SERVICE_ACCOUNT_JSON` | Firebase Admin credentials |
 
-```bash
-python main.py
-```
+`KICKOFF_ROLE_ID` and `ASSIGN_KICKOFF_ROLE` control the optional orientation
+role. Keep YUVI's Firebase project and internal secret aligned with the
+dashboard API.
 
-Or run directly with Uvicorn:
-```bash
-uvicorn server:app --host 0.0.0.0 --port 8000
-```
+## Code map
 
-## Coordinated secure-link rollout
-
-Deploy with the matching Dashboard API/web PR; `FRONTEND_AUTH_URL` must point to
-the Next.js `web/` `/auth` page, not the legacy client. Old numeric-ID links no
-longer establish ownership. Existing members run `/auth` again to receive proof.
-
-`discord_link_tokens/{sha256(token)}` stores `discord_id`, native timestamp
-`issued_at`, native timestamp `expires_at` (ten minutes), and `consumed_by: null`.
-The API consumes it transactionally, adding `consumed_by` (Firebase UID), `email`,
-and `consumed_at`, and sets `discord_link_version: 1` on the canonical `users/{uid}`
-record. The webhook checks the record as well as the shared secret.
-Client Firestore rules must deny access to this collection and writes to user
-records. Optional TTL on `expires_at` is for cleanup; the API checks expiry itself.
-
-Deploy the Dashboard API/web first, then this bot in the same change window.
-Configure the same `BOT_INTERNAL_SECRET` on both backends and a reachable
-`YUVI_BOT_URL` on Dashboard. Missing roles, permissions, service outages, and
-conflicting old links need operator attention; retries never claim a role that
-was not assigned. Repeating a successful callback does not send another DM.
-
-Run `uv run python -m unittest discover -s tests -v` before deployment. Tests use
-external-service doubles and never connect to the production database or gateway.
-A real Google sign-in, Discord role grant, and linked ticket read must be checked
-on the deployed pair before announcing readiness to members.
+| Path | Responsibility |
+|---|---|
+| `cogs/` | Discord commands for auth, tickets, and ideas |
+| `views/` | Persistent panels and ticket controls |
+| `models/` | Firestore-facing ticket and idea models |
+| `utils/` | Firestore access, member links, ticket manager, queue |
+| `server.py` | FastAPI callbacks and bot lifecycle |
+| `tests/` | Local fixtures; no production Discord or Firestore calls |
